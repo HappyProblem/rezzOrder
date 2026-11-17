@@ -2,11 +2,6 @@
 
 #include <cstdint>
 
-// Instant revive skills, WvW values. Sources: wiki.guildwars2.com raw pages, api.guildwars2.com and the
-// Phase 0 recordings (notes/phase0-results.md).
-
-// Skills that share one cooldown on a player's bar. Glyph attunement variants are one glyph; the ranger
-// spirit's slams are effects of the Spirit of Nature cast.
 enum class ReviveGroup : uint8_t
 {
 	SignetOfMercy,
@@ -22,13 +17,13 @@ struct ReviveGroupInfo
 {
 	const char* Name;
 	const char* Profession;
-	uint16_t    WvwRechargeS; // base WvW recharge, before alacrity/chilled/traits
+	uint16_t    WvwRechargeS;
 };
 
 inline constexpr ReviveGroupInfo kReviveGroups[static_cast<int>(ReviveGroup::Count)] = {
 	{ "Signet of Mercy",   "Guardian",     90  },
 	{ "Glyph of Renewal",  "Elementalist", 90  },
-	{ "Illusion of Life",  "Mesmer",       90  }, // confirmed in the field: 94 s shortest recast
+	{ "Illusion of Life",  "Mesmer",       90  },
 	{ "Signet of Undeath", "Necromancer",  75  },
 	{ "Battle Standard",   "Warrior",      120 },
 	{ "Spirit of Nature",  "Ranger",       120 },
@@ -39,9 +34,9 @@ struct ReviveSkill
 	uint32_t    Id;
 	const char* Name;
 	ReviveGroup Group;
-	bool        IsPlayerCast; // false for effects cast by something else (the spirit's slams)
-	uint8_t     WvwTargets;   // max downed allies revived in WvW
-	uint16_t    CastMs;       // base activation time; a stop at or after this many base ms counts as used
+	bool        IsPlayerCast;
+	uint8_t     WvwTargets;
+	uint16_t    CastMs;
 };
 
 inline constexpr ReviveSkill kReviveSkills[] = {
@@ -52,6 +47,8 @@ inline constexpr ReviveSkill kReviveSkills[] = {
 	{ 5763,  "Renewal of Water",              ReviveGroup::GlyphOfRenewal,  true,  1, 2000 },
 	{ 5760,  "Renewal of Air",                ReviveGroup::GlyphOfRenewal,  true,  1, 2000 },
 	{ 5761,  "Renewal of Earth",              ReviveGroup::GlyphOfRenewal,  true,  3, 2000 },
+	{ 5764,  "Renewal of Fire (effect)",      ReviveGroup::GlyphOfRenewal,  true,  1, 2000 },
+	{ 5765,  "Renewal of Air (effect)",       ReviveGroup::GlyphOfRenewal,  true,  1, 2000 },
 	{ 24407, "Renewal of Fire (underwater)",  ReviveGroup::GlyphOfRenewal,  true,  1, 2000 },
 	{ 24410, "Renewal of Water (underwater)", ReviveGroup::GlyphOfRenewal,  true,  1, 2000 },
 	{ 24409, "Renewal of Air (underwater)",   ReviveGroup::GlyphOfRenewal,  true,  1, 2000 },
@@ -60,24 +57,22 @@ inline constexpr ReviveSkill kReviveSkills[] = {
 	{ 10611, "Signet of Undeath",             ReviveGroup::SignetOfUndeath, true,  1, 1500 },
 	{ 14419, "Battle Standard",               ReviveGroup::BattleStandard,  true,  3, 2000 },
 	{ 12569, "Spirit of Nature",              ReviveGroup::SpiritOfNature,  true,  2, 1500 },
-	{ 12601, "Nature's Renewal",              ReviveGroup::SpiritOfNature,  false, 2, 750  }, // first slam
-	{ 69336, "Nature's Renewal (2nd slam)",   ReviveGroup::SpiritOfNature,  false, 2, 750  }, // Nature's Vengeance trait
+	{ 12601, "Nature's Renewal",              ReviveGroup::SpiritOfNature,  false, 2, 750  },
+	{ 69336, "Nature's Renewal (2nd slam)",   ReviveGroup::SpiritOfNature,  false, 2, 750  },
 };
 
-// The effect Illusion of Life leaves on each ally it revives: 15 s, after which they go down again unless they
-// killed something and rallied. Its apply names who it revived; its early removal is the rally.
-inline constexpr uint32_t kIllusionOfLifeEffect = 10346;
+inline constexpr uint32_t kSignetOfMercyPassive   = 9162;
+inline constexpr uint32_t kSignetOfUndeathPassive = 10610;
+inline constexpr uint32_t kRenewalOfFireBuff      = 5764;
+inline constexpr uint32_t kRenewalOfAirBuff       = 5765;
+inline constexpr uint32_t kResurrectionBuff       = 848;
+inline constexpr uint32_t kIllusionOfLifeEffect   = 10346;
 
 const ReviveSkill* FindReviveSkill(uint32_t aSkillId);
-// How many downed allies one cast of this group's skill picks up in WvW. 0 for an unknown group.
+const ReviveSkill* PrimarySkillForGroup(ReviveGroup aGroup);
+ReviveGroup DefaultGroupForProfession(uint32_t aProfession);
+ReviveGroup FindReviveGroupByName(const char* aName);
 uint8_t GroupTargets(ReviveGroup aGroup);
 const ReviveGroupInfo& GetGroupInfo(ReviveGroup aGroup);
-
-// Whether a stopped cast spent the skill. Rule from Phase 0 (notes/phase0-results.md: 0 contradictions over
-// ~430 casts, incl. quickness and slow): arcdps reports a full cast (stop reason RETURN_CONTROL), or the cast
-// ran for at least the base cast time. aBaseMs is cbtevent.buff_dmg on the stop event (speed-independent).
 bool CountsAsUsed(const ReviveSkill& aSkill, uint8_t aStopReason, int32_t aBaseMs);
-
-// True for skill/effect names that look revive-related (English client). Used only to widen logging
-// so effect ids we don't know yet still get recorded.
 bool IsReviveRelatedName(const char* aName);

@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstring>
 
 #include "Share.h"
 
@@ -9,24 +10,17 @@ namespace Rezz
 {
 	namespace
 	{
-		constexpr uint32_t kSignetOfMercyPassive   = 9162;
-		constexpr uint32_t kSignetOfUndeathPassive = 10610;
-		// Our own self leave arrives ~1 s after arcdps removed every squad member for our map change.
 		constexpr uint64_t kSelfLeaveSlackMs = 3000;
-		// More notices than this in one tick are merged into one.
 		constexpr size_t   kMaxSeparateNotices = 3;
+		constexpr uint8_t  CBTB_MANUAL = 3;
+
+		constexpr uint32_t kBoonRegeneration = 718;
+		constexpr uint32_t kBoonSwiftness    = 719;
+		constexpr uint32_t kBoonFury         = 725;
+		constexpr uint32_t kBoonMight        = 740;
 
 		uint32_t GroupBit(ReviveGroup aGroup) { return 1u << static_cast<uint32_t>(aGroup); }
 
-		std::string Lower(std::string aText)
-		{
-			std::transform(aText.begin(), aText.end(), aText.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-			return aText;
-		}
-
-		// Same ordering as comparing two Lower() copies, without building them. The roster is sorted on every
-		// frame the overlay draws, so a comparator that allocates twice per comparison is a few hundred
-		// allocations a frame, and it holds the session lock while the arcdps thread is waiting for it.
 		bool LessNoCase(const std::string& aLeft, const std::string& aRight)
 		{
 			size_t shared = std::min(aLeft.size(), aRight.size());
@@ -44,12 +38,12 @@ namespace Rezz
 	{
 		switch (aProfession)
 		{
-			case 1: // Guardian: Signet of Mercy
-			case 2: // Warrior: Battle Standard
-			case 4: // Ranger: Spirit of Nature
-			case 6: // Elementalist: Glyph of Renewal
-			case 7: // Mesmer: Illusion of Life
-			case 8: // Necromancer: Signet of Undeath
+			case 1:
+			case 2:
+			case 4:
+			case 6:
+			case 7:
+			case 8:
 				return true;
 			default:
 				return false;
@@ -65,10 +59,8 @@ namespace Rezz
 	bool IsUsableCharacterName(const std::string& aName)
 	{
 		if (aName.empty()) { return false; }
-		// Character names never contain digits, so anything with one is a placeholder like "ag1458".
 		for (unsigned char c : aName) { if (std::isdigit(c)) { return false; } }
 
-		// WvW rank names are "<tier> <rank>" and repeat between players (English client).
 		static const char* kTiers[] = { "Bronze", "Silver", "Gold", "Platinum", "Mithril", "Diamond" };
 		static const char* kRanks[] = { "Invader", "Assaulter", "Raider", "Recruit", "Scout", "Soldier",
 			"Squire", "Footman", "Knight", "Major", "Colonel", "General", "Veteran", "Champion", "Legend",
@@ -121,8 +113,6 @@ namespace Rezz
 		return it == order.end() ? 0 : static_cast<int>(it - order.begin()) + 1;
 	}
 
-	// Taking over somebody else's order can move us in it, and where we stand is the one thing about the
-	// order that has to reach us without looking.
 	std::string Session::PlaceChange(int aPlaceBefore) const
 	{
 		int now = SelfPlace();
@@ -187,12 +177,55 @@ namespace Rezz
 		return {};
 	}
 
+	void Session::RecordSkillUse(uint64_t aTimeMs, const std::string& aAccount, ReviveGroup aGroup)
+	{
+		if (aAccount.empty() || aGroup == ReviveGroup::Count) { return; }
+		TurnView turn = m_Tracker.GetTurn(aTimeMs);
+		bool inTurn = turn.UpIndex >= 0 && turn.Rows[turn.UpIndex].Account == aAccount;
+		if (!m_Tracker.MarkUsed(aTimeMs, aAccount, aGroup)) { return; }
+		GetMember(aAccount).SeenGroups |= GroupBit(aGroup);
+		m_Stats.OnCast(aTimeMs, aAccount, true, CastEnd::Full, inTurn);
+		TakeAttributions();
+	}
+
+	void Session::MarkPlayerUsed(const std::string& aAccount, uint64_t aNowMs)
+	{
+		std::string target = aAccount.empty() ? m_SelfAccount : aAccount;
+		if (target.empty()) { return; }
+		ReviveGroup group = ReviveGroup::Count;
+		if (const PlayerStatus* status = m_Tracker.FindPlayer(target))
+		{
+			if (!status->Skills.empty()) { group = status->Skills.front().Group; }
+		}
+		if (group == ReviveGroup::Count)
+		{
+			group = DefaultGroupForProfession(GetMember(target).Profession);
+		}
+		RecordSkillUse(aNowMs, target, group);
+	}
+
+	void Session::MarkPlayerReady(const std::string& aAccount, uint64_t aNowMs)
+	{
+		std::string target = aAccount.empty() ? m_SelfAccount : aAccount;
+		if (target.empty()) { return; }
+		if (const PlayerStatus* status = m_Tracker.FindPlayer(target))
+		{
+			for (const SkillStatus& skill : status->Skills)
+			{
+				m_Tracker.MarkSkillReady(aNowMs, target, skill.Group);
+			}
+		}
+		ReviveGroup def = DefaultGroupForProfession(GetMember(target).Profession);
+		if (def != ReviveGroup::Count) { m_Tracker.MarkSkillReady(aNowMs, target, def); }
+	}
+
 	void Session::OnCombat(const ArcDps::EvCombatData& aData, uint64_t aNowMs)
 	{
 		if (aData.Ev == nullptr) { return; }
 		const ArcDps::CombatEvent& ev = *aData.Ev;
 		uint8_t sc = ev.IsStatechange;
 		uint64_t srcId = aData.Src ? aData.Src->Id : ev.SrcAgent;
+		uint64_t dstId = aData.Dst ? aData.Dst->Id : ev.DstAgent;
 
 		switch (sc)
 		{
@@ -200,8 +233,6 @@ namespace Rezz
 			case ArcDps::CBTS_SQCOMBATEND:   m_CombatSinceMs = 0; m_OutOfCombatSinceMs = aNowMs; return;
 			case ArcDps::CBTS_ENTERCOMBAT:
 			{
-				// Fallback when the squad-wide events don't arrive. Somebody fighting again also means the break
-				// that would have reset the turn is over.
 				if (m_CombatSinceMs == 0) { m_CombatSinceMs = aNowMs; m_OutOfCombatSinceMs = 0; }
 				std::string account = ResolveAccount(srcId, ev.SrcInstId);
 				if (!account.empty()) { GetMember(account).LastEventMs = aNowMs; }
@@ -227,7 +258,6 @@ namespace Rezz
 				if (skill == nullptr) { return; }
 				if (!skill->IsPlayerCast)
 				{
-					// The spirit's slam: owner by master instance id.
 					std::string owner = AccountByInstance(ev.SrcMasterInstId);
 					if (!owner.empty()) { m_Tracker.OnOwnedEffect(ev.Time, owner, ev.SkillId); }
 					TakeAttributions();
@@ -236,7 +266,6 @@ namespace Rezz
 				std::string account = ResolveAccount(srcId, ev.SrcInstId);
 				if (account.empty()) { return; }
 
-				// Worked out before the tracker marks the skill spent, which would take them out of the running.
 				bool used = CountsAsUsed(*skill, ev.Result, ev.BuffDmg);
 				TurnView turn = m_Tracker.GetTurn(ev.Time);
 				bool inTurn = turn.UpIndex >= 0 && turn.Rows[turn.UpIndex].Account == account;
@@ -251,7 +280,6 @@ namespace Rezz
 						case ArcDps::ANIMSTOP_MOVEDODGE: ending = CastEnd::Movement; break;
 						default: ending = CastEnd::ByHand; break;
 					}
-					// Going down mid-cast reads as a cancel too, and is worth telling apart.
 					if (caster && caster->Life != LifeState::Alive) { ending = CastEnd::WentDown; }
 				}
 				m_Stats.OnCast(ev.Time, account, used, ending, inTurn);
@@ -278,51 +306,164 @@ namespace Rezz
 				if (state == LifeState::Downed) { m_Stats.OnDown(ev.Time, account, ChanceNow(ev.Time)); }
 				else if (state == LifeState::Dead) { m_Stats.OnDead(ev.Time, account); }
 				else { m_PendingUps.push_back(PendingUp{ account, ev.Time, aNowMs }); }
-				// Down or dead under Illusion of Life: either it ran out, or they went down before it did. Both
-				// leave nothing to warn about.
 				if (state != LifeState::Alive) { m_Illusions.erase(account); }
 				if (sc == ArcDps::CBTS_CHANGEUP && !m_IllusionApplySeen) { MatchIllusion(ev.Time, account, false); }
 				return;
 			}
+			case ArcDps::CBTS_COMBAT:
 			case ArcDps::CBTS_BUFFAPPLY:
 			case ArcDps::CBTS_BUFFINITIAL:
 			{
-				// Any buff on a squad member shows they are within range of us.
-				uint64_t dstId = aData.Dst ? aData.Dst->Id : ev.DstAgent;
-				std::string account = ResolveAccount(dstId, ev.DstInstId);
-				if (account.empty()) { return; }
-				GetMember(account).LastEventMs = aNowMs;
-
-				// Illusion of Life on them. The effect itself is the only sure sign of who a cast revived: another
-				// revive landing at the same moment, or a rally off an enemy dying, gets a player up without it
-				// (field log 2026-09-15: four allies up at the instant of a cast that can only take three).
-				if (ev.SkillId == kIllusionOfLifeEffect)
+				std::string srcAccount = ResolveAccount(srcId, ev.SrcInstId);
+				std::string dstAccount = ResolveAccount(dstId, ev.DstInstId);
+				if (!srcAccount.empty())
 				{
-					m_IllusionApplySeen = true;
-					uint64_t length = ev.Value > 0 ? static_cast<uint64_t>(ev.Value) : 15000;
-					std::string caster = ResolveAccount(srcId, ev.SrcInstId);
-					m_Illusions[account] = IllusionState{ ev.Time + length, caster };
-					// The effect landed, so the skill was spent even if its cast was reported as cancelled.
-					m_Tracker.MarkUsed(ev.Time, caster, ReviveGroup::IllusionOfLife);
+					GetMember(srcAccount).LastEventMs = aNowMs;
+					m_Tracker.OnActivity(ev.Time, srcAccount);
+				}
+				if (!dstAccount.empty()) { GetMember(dstAccount).LastEventMs = aNowMs; }
+
+				if (sc == ArcDps::CBTS_COMBAT && ev.IsBuffRemove != 0)
+				{
+					if (ev.SkillId == kIllusionOfLifeEffect && !srcAccount.empty())
+					{
+						m_Illusions.erase(srcAccount);
+						return;
+					}
+					if ((ev.SkillId == kSignetOfMercyPassive || ev.SkillId == kSignetOfUndeathPassive) && ev.IsBuffRemove != CBTB_MANUAL)
+					{
+						std::string holder = !srcAccount.empty() ? srcAccount : dstAccount;
+						const PlayerStatus* status = m_Tracker.FindPlayer(holder);
+						if (!holder.empty() && GetMember(holder).OnMap && (status == nullptr || (status->Life == LifeState::Alive && !status->Away)))
+						{
+							ReviveGroup group = ev.SkillId == kSignetOfMercyPassive ? ReviveGroup::SignetOfMercy : ReviveGroup::SignetOfUndeath;
+							RecordSkillUse(ev.Time, holder, group);
+						}
+					}
 					return;
 				}
 
-				// A signet passive shows the signet is slotted, and that it is off cooldown right now.
-				ReviveGroup group = ev.SkillId == kSignetOfMercyPassive ? ReviveGroup::SignetOfMercy
-					: ev.SkillId == kSignetOfUndeathPassive ? ReviveGroup::SignetOfUndeath : ReviveGroup::Count;
-				if (group == ReviveGroup::Count) { return; }
-				GetMember(account).SeenGroups |= GroupBit(group);
-				m_Tracker.MarkSkillReady(ev.Time, account, group);
+				if (const ReviveSkill* skill = FindReviveSkill(ev.SkillId))
+				{
+					if (skill->IsPlayerCast)
+					{
+						std::string caster = !srcAccount.empty() ? srcAccount : dstAccount;
+						if (caster.empty() && ev.SrcMasterInstId != 0) { caster = AccountByInstance(ev.SrcMasterInstId); }
+						RecordSkillUse(ev.Time, caster, skill->Group);
+					}
+					else
+					{
+						std::string owner = AccountByInstance(ev.SrcMasterInstId);
+						if (owner.empty()) { owner = srcAccount; }
+						if (!owner.empty())
+						{
+							RecordSkillUse(ev.Time, owner, skill->Group);
+							m_Tracker.OnOwnedEffect(ev.Time, owner, ev.SkillId);
+							TakeAttributions();
+						}
+					}
+					return;
+				}
+
+				ReviveGroup byName = FindReviveGroupByName(aData.SkillName);
+				if (byName == ReviveGroup::Count && aData.Src && aData.Src->Name)
+				{
+					byName = FindReviveGroupByName(aData.Src->Name);
+				}
+				if (byName != ReviveGroup::Count)
+				{
+					std::string caster = srcAccount;
+					if (caster.empty() && ev.SrcMasterInstId != 0) { caster = AccountByInstance(ev.SrcMasterInstId); }
+					if (caster.empty()) { caster = dstAccount; }
+					RecordSkillUse(ev.Time, caster, byName);
+					return;
+				}
+
+				bool isBoonApply = sc == ArcDps::CBTS_BUFFAPPLY ||
+					(sc == ArcDps::CBTS_COMBAT && ev.Buff != 0 && ev.IsBuffRemove == 0 && ev.Value != 0);
+				if (isBoonApply && ev.SrcMasterInstId != 0 && srcAccount.empty() && srcId != 0)
+				{
+					std::string owner = AccountByInstance(ev.SrcMasterInstId);
+					if (!owner.empty())
+					{
+						uint32_t prof = GetMember(owner).Profession;
+						if (prof == 2 && (ev.SkillId == kBoonMight || ev.SkillId == kBoonFury || ev.SkillId == kBoonSwiftness))
+						{
+							MinionBoonState& state = m_MinionBoons[srcId];
+							if (state.FirstMs == 0 || ev.Time > state.FirstMs + 1500) { state = MinionBoonState{ ev.Time, 0 }; }
+							if (ev.SkillId == kBoonMight) { state.Mask |= 1; }
+							else if (ev.SkillId == kBoonFury) { state.Mask |= 2; }
+							else if (ev.SkillId == kBoonSwiftness) { state.Mask |= 4; }
+							if ((state.Mask & 7) == 7)
+							{
+								RecordSkillUse(ev.Time, owner, ReviveGroup::BattleStandard);
+								return;
+							}
+						}
+						else if (prof == 4 && ev.SkillId == kBoonRegeneration && ev.Value >= 1500 && ev.Value <= 6500)
+						{
+							bool isPet = aData.Src && aData.Src->Name && std::strncmp(aData.Src->Name, "Juvenile ", 9) == 0;
+							if (!isPet)
+							{
+								RecordSkillUse(ev.Time, owner, ReviveGroup::SpiritOfNature);
+								return;
+							}
+						}
+					}
+				}
+
+				if (sc != ArcDps::CBTS_BUFFAPPLY && sc != ArcDps::CBTS_BUFFINITIAL && !isBoonApply) { return; }
+
+				if (ev.SkillId == kIllusionOfLifeEffect && !dstAccount.empty())
+				{
+					m_IllusionApplySeen = true;
+					uint64_t length = ev.Value > 0 ? static_cast<uint64_t>(ev.Value) : 15000;
+					m_Illusions[dstAccount] = IllusionState{ ev.Time + length, srcAccount };
+					RecordSkillUse(ev.Time, srcAccount, ReviveGroup::IllusionOfLife);
+					return;
+				}
+
+				if (ev.SkillId == kResurrectionBuff && !srcAccount.empty() && srcAccount != dstAccount)
+				{
+					ReviveGroup group = DefaultGroupForProfession(GetMember(srcAccount).Profession);
+					if (group == ReviveGroup::GlyphOfRenewal)
+					{
+						RecordSkillUse(ev.Time, srcAccount, group);
+						return;
+					}
+				}
+
+				if (!dstAccount.empty())
+				{
+					ReviveGroup group = ev.SkillId == kSignetOfMercyPassive ? ReviveGroup::SignetOfMercy
+						: ev.SkillId == kSignetOfUndeathPassive ? ReviveGroup::SignetOfUndeath : ReviveGroup::Count;
+					if (group != ReviveGroup::Count)
+					{
+						GetMember(dstAccount).SeenGroups |= GroupBit(group);
+						m_Tracker.MarkSkillReady(ev.Time, dstAccount, group);
+					}
+				}
 				return;
 			}
 			case ArcDps::CBTS_BUFFREMOVE_ALL:
 			case ArcDps::CBTS_BUFFREMOVE_SINGLE:
 			{
-				// Illusion of Life ending early: they killed something and rallied, so there is nothing left to
-				// count down (field test 2026-09-16: removed with 4962 ms left at the moment the enemy died).
-				if (ev.SkillId != kIllusionOfLifeEffect) { return; }
-				std::string account = ResolveAccount(srcId, ev.SrcInstId); // on a removal, src is who loses it
-				if (!account.empty()) { m_Illusions.erase(account); }
+				std::string srcAccount = ResolveAccount(srcId, ev.SrcInstId);
+				if (ev.SkillId == kIllusionOfLifeEffect)
+				{
+					if (!srcAccount.empty()) { m_Illusions.erase(srcAccount); }
+					return;
+				}
+				if ((ev.SkillId == kSignetOfMercyPassive || ev.SkillId == kSignetOfUndeathPassive) && ev.IsBuffRemove != CBTB_MANUAL)
+				{
+					std::string holder = !srcAccount.empty() ? srcAccount : ResolveAccount(dstId, ev.DstInstId);
+					const PlayerStatus* status = m_Tracker.FindPlayer(holder);
+					if (!holder.empty() && GetMember(holder).OnMap && (status == nullptr || (status->Life == LifeState::Alive && !status->Away)))
+					{
+						ReviveGroup group = ev.SkillId == kSignetOfMercyPassive ? ReviveGroup::SignetOfMercy : ReviveGroup::SignetOfUndeath;
+						RecordSkillUse(ev.Time, holder, group);
+					}
+				}
 				return;
 			}
 			default:
@@ -336,25 +477,20 @@ namespace Rezz
 		if (account.empty()) { return; }
 		bool isSelf = aUpdate.Self != 0;
 		bool added = aUpdate.Added != 0;
-		m_Aliases.clear(); // may point at an entry being replaced or removed
+		m_Aliases.clear();
 
 		RosterMember& member = GetMember(account);
 		if (isSelf)
 		{
 			m_SelfAccount = account;
-			// Unofficial Extras may report our role before arcdps tells us which account is ours.
 			if (!member.IsSelf && member.Role == SquadRole::None) { OnSelfLeftSquad(); }
 			member.IsSelf = true;
-			// Back from a loading screen: check afterwards who really came back with us.
 			if (added) { m_ResyncAtMs = aNowMs + kResyncAfterMs; }
-			// Whether a new map also swallows the first Illusion of Life apply isn't known yet, so the stand-in is
-			// ready again after every one. Once an apply comes through it steps aside.
 			if (added) { m_IllusionApplySeen = false; }
 			if (!added)
 			{
-				// Our own map change: the squad leaves just before this are not real leaves.
 				m_LastSelfLeaveMs = aNowMs;
-				m_ResyncAtMs = 0; // we are loading; the check restarts once we are back on a map
+				m_ResyncAtMs = 0;
 				std::erase_if(m_PendingLeaves, [&](const PendingLeave& aLeave) { return aLeave.TimeMs + kSelfLeaveSlackMs >= aNowMs; });
 			}
 		}
@@ -378,30 +514,23 @@ namespace Rezz
 		uint32_t previousProfession = member.Profession;
 		std::string previousCharacter = member.Character;
 		member.Character = aUpdate.Character;
-		// While a player loads, arcdps reports profession 0 and elite 0: keep what was known.
 		if (aUpdate.Profession != 0)
 		{
 			member.Profession = aUpdate.Profession;
 			member.Elite = aUpdate.Elite;
 		}
-		// arcdps' subgroup is 1 for everybody in the field logs; Unofficial Extras' is the real one.
 		if (!m_Subgroups.count(account)) { member.Subgroup = aUpdate.Subgroup; }
 		member.OnMap = true;
 		m_Tracker.SetAway(aNowMs, account, false);
 		std::erase_if(m_PendingLeaves, [&](const PendingLeave& aLeave) { return aLeave.Account == account; });
 
 		bool swappedProfession = previousProfession != 0 && aUpdate.Profession != 0 && previousProfession != aUpdate.Profession;
-		// Another character of the same profession is still another skill bar. Placeholder names are never
-		// compared: Edge of the Mists reports WvW ranks instead of character names, and everybody on the map
-		// would look like they had just swapped.
 		bool swappedCharacter = !swappedProfession && previousCharacter != member.Character &&
 			IsUsableCharacterName(previousCharacter) && IsUsableCharacterName(member.Character);
 		bool changed = swappedProfession || swappedCharacter;
 		if (changed) { m_Tracker.ForgetSkills(account); member.SeenGroups = 0; }
 		if (m_Substitutes && !m_Vacancies.empty())
 		{
-			// Swapped out to something without a revive skill and back again; or a substitute who moved in on
-			// the wrong character and is now on the right one.
 			if (!isSelf && !InOrder(account) && SureReviver(member)) { ReclaimPlace(account, aNowMs, SubgroupOf(account)); }
 			MatchSubstitutes(aNowMs);
 		}
@@ -415,13 +544,10 @@ namespace Rezz
 				: " swapped character");
 			if (m_Substitutes && SureReviver(member))
 			{
-				// Druids and troubadours carry their revive skill on any character. Its state starts again unknown.
 				text += ", keeps their place";
 			}
 			else
 			{
-				// A different skill bar, and no telling whether it carries a revive skill. The place stays open for
-				// a substitute, or for them swapping back.
 				if (!IsReviveProfession(member.Profession)) { text += " (no revive skill)"; }
 				DropFromOrder(account, SubgroupOf(account), aNowMs);
 				text += ", out of the order";
@@ -442,7 +568,7 @@ namespace Rezz
 		m_HasRoles = true;
 		RosterMember& member = GetMember(aAccount);
 		member.Role = aRole;
-		if (aSubgroup != 0) { member.Subgroup = aSubgroup; } // 0 only while loading or not in the squad
+		if (aSubgroup != 0) { member.Subgroup = aSubgroup; }
 
 		if (member.IsSelf && aRole == SquadRole::None) { OnSelfLeftSquad(); }
 
@@ -457,9 +583,6 @@ namespace Rezz
 			{
 				if (previousGroup == 0)
 				{
-					// No subgroup before: they just joined the squad, or Unofficial Extras is listing the squad for
-					// the first time (our own start or reload). Neither is moving in, and treating it as one would
-					// let whoever already stood in a subgroup take a benched player's place on this client alone.
 					ReclaimPlace(aAccount, aNowMs, 0);
 				}
 				else if (InOrder(aAccount))
@@ -484,9 +607,8 @@ namespace Rezz
 
 		if (inSquad == member.InSquad) { return; }
 		member.InSquad = inSquad;
-		if (inSquad || member.IsSelf || aRole != SquadRole::None) { return; } // invited/applied: not a leave
+		if (inSquad || member.IsSelf || aRole != SquadRole::None) { return; }
 
-		// Left the squad: known at once, ~2.7 s before arcdps removes them.
 		int standing = SelfStanding(aNowMs);
 		m_Tracker.SetAway(aNowMs, aAccount, true);
 		std::erase_if(m_PendingLeaves, [&](const PendingLeave& aLeave) { return aLeave.Account == aAccount; });
@@ -494,11 +616,9 @@ namespace Rezz
 		m_Subgroups.erase(aAccount);
 		if (InOrder(aAccount))
 		{
-			// Their place is part of the message, so it is read off before they lose it.
 			std::string name = Named(aAccount);
 			bool report = !m_Reported.count(aAccount);
 			DropFromOrder(aAccount, previousGroup, aNowMs);
-			// Somebody ahead of us dropping out is how the turn reaches us without anyone casting.
 			if (report)
 			{
 				Notify(NoticeKind::LeftSquad, aAccount, name + " left the squad, out of the order" +
@@ -534,8 +654,6 @@ namespace Rezz
 		if (m_BenchGroup == 0 || aGroup == 0) { return false; }
 		if (m_BenchGroup == Share::kBenchLast)
 		{
-			// The highest subgroup anybody is in, the mover counted where they still are. An empty subgroup past
-			// it is a new group being built, unless it is the bench that the last swap emptied.
 			uint16_t last = 0;
 			for (const auto& [account, group] : m_Subgroups) { last = std::max(last, group); }
 			bool emptiedBench = aGroup > last && aGroup == m_LastBenched;
@@ -569,8 +687,6 @@ namespace Rezz
 		bool precast = std::find(m_Precast.begin(), m_Precast.end(), aAccount) != m_Precast.end();
 		bool open = m_Substitutes && aOpenFor != 0;
 
-		// Open places are kept as "in front of whoever is at Index". The ones in front of this player stay; the
-		// ones right behind now wait in front of the player after them, behind this place.
 		uint32_t ahead = 0;
 		for (const Vacancy& vacancy : m_Vacancies) { if (vacancy.Index == place) { ahead++; } }
 		for (Vacancy& vacancy : m_Vacancies)
@@ -580,8 +696,6 @@ namespace Rezz
 			vacancy.Index--;
 		}
 
-		// Not SetOrder: that treats any change as a new order and starts the rotation again, which would move
-		// everyone's turn because one person walked away.
 		m_Tracker.RemoveFromOrder(aAccount);
 		std::erase(m_Precast, aAccount);
 		std::erase_if(m_Vacancies, [&](const Vacancy& aVacancy) { return aVacancy.Account == aAccount; });
@@ -651,7 +765,6 @@ namespace Rezz
 			auto sure = [this](const std::string& aAccount)
 			{
 				auto member = m_Roster.find(aAccount);
-				// On the wrong character, or not on our map yet: waits, and counts once that changes.
 				return member != m_Roster.end() && SureReviver(member->second);
 			};
 			std::vector<std::string> candidates;
@@ -661,8 +774,6 @@ namespace Rezz
 					InOrder(arrival.Account) || !sure(arrival.Account)) { continue; }
 				candidates.push_back(arrival.Account);
 			}
-			// Nobody moved into the subgroup this place was left from: in a rotation of three or more the
-			// substitute lands somewhere else entirely, and all that marks them is coming off the bench.
 			bool offBench = candidates.empty();
 			if (offBench)
 			{
@@ -674,8 +785,6 @@ namespace Rezz
 			}
 			if (candidates.empty()) { i++; continue; }
 
-			// Places waiting for the same candidates: the ones left from this subgroup, or every open place
-			// when the match is by coming off the bench.
 			int holes = 0, sameHoles = 0;
 			for (const Vacancy& other : m_Vacancies)
 			{
@@ -688,7 +797,6 @@ namespace Rezz
 			if (candidates.size() == 1 && holes == 1) { pick = candidates[0]; }
 			else
 			{
-				// Several at once: a druid replaces a druid. Only when that leaves no doubt either way.
 				std::vector<std::string> same;
 				for (const std::string& candidate : candidates)
 				{
@@ -697,7 +805,6 @@ namespace Rezz
 				if (same.size() == 1 && sameHoles == 1) { pick = same[0]; }
 				else if (static_cast<int>(candidates.size()) >= holes)
 				{
-					// Everybody has moved and it still can't be told apart: say so once and leave it to them.
 					uint16_t group = vacancy.Subgroup;
 					std::string names;
 					for (const Vacancy& other : m_Vacancies)
@@ -712,7 +819,7 @@ namespace Rezz
 					i = 0;
 					continue;
 				}
-				else { i++; continue; } // more moves are on their way
+				else { i++; continue; }
 			}
 
 			int standing = SelfStanding(aNowMs);
@@ -731,12 +838,10 @@ namespace Rezz
 		for (const OrderRow& row : turn.Rows)
 		{
 			if (row.Status != Eligibility::Ready) { continue; }
-			// How many allies that player could pick up with what they have: the skill they have been seen
-			// using, or the one their profession carries.
 			ReviveGroup group = ReviveGroup::Count;
 			if (row.Player != nullptr && !row.Player->Skills.empty()) { group = row.Player->Skills.front().Group; }
 			uint8_t targets = group == ReviveGroup::Count ? 0 : GroupTargets(group);
-			chance.Capacity += targets > 0 ? targets : 1; // not seen casting yet: assume they can pick up one
+			chance.Capacity += targets > 0 ? targets : 1;
 		}
 		return chance;
 	}
@@ -754,8 +859,6 @@ namespace Rezz
 
 	void Session::SettleUps(uint64_t aNowMs)
 	{
-		// An ally getting up is matched with the cast that did it a moment later, so each up waits before it is
-		// counted as revived or as a rally.
 		constexpr uint64_t kSameUpMs = 1500;
 		for (size_t i = 0; i < m_PendingUps.size(); )
 		{
@@ -774,8 +877,6 @@ namespace Rezz
 
 	void Session::MatchIllusion(uint64_t aTimeMs, const std::string& aAccount, bool aIsCast)
 	{
-		// In the field logs the ally gets up at exactly the millisecond the cast completes, and the two events
-		// arrive in either order. Anyone getting up at any other moment was revived some other way.
 		constexpr uint64_t kSameInstantMs = 50;
 		constexpr uint64_t kKeepMs        = 2000;
 		constexpr uint64_t kLengthMs      = 15000;
@@ -807,8 +908,6 @@ namespace Rezz
 		m_RecentGotUp.push_back(RecentEvent{ aTimeMs, aAccount });
 	}
 
-	// Whether we could revive somebody right now: a revive profession, on our feet, on this map, and a revive
-	// skill that is ready. Not having seen our skill used yet counts as ready, as it does in the order.
 	bool Session::SelfCanRevive(uint64_t aNowMs) const
 	{
 		if (m_SelfAccount.empty()) { return false; }
@@ -827,8 +926,6 @@ namespace Rezz
 
 	void Session::OnSelfLeftSquad()
 	{
-		// Map changes never report role None (field log); it only comes when we really left, or at startup
-		// when we aren't in a squad.
 		if (m_Tracker.Order().empty()) { return; }
 		m_Tracker.SetOrder({});
 		m_PendingLeaves.clear();
@@ -846,15 +943,9 @@ namespace Rezz
 	void Session::Tick(uint64_t aNowMs)
 	{
 		std::erase_if(m_Illusions, [aNowMs](const auto& aEntry) { return aEntry.second.EndsAt <= aNowMs; });
-		// A profession arcdps only now reported can settle a swap that was waiting on it.
+		std::erase_if(m_MinionBoons, [aNowMs](const auto& aEntry) { return aEntry.second.FirstMs + 10000 < aNowMs; });
 		if (!m_Vacancies.empty()) { MatchSubstitutes(aNowMs); }
 
-		// Out of a fight the turn is always at the top of the order (decided with the squad, 2026-09-16).
-		// Field test: whoever cast last was remembered into the next fight, so the turn started somewhere in
-		// the middle of the list with every skill ready, and reordering anyone was the only way back. A break
-		// shorter than kRotationResetMs is the same fight carrying on, and the rotation carries on with it.
-		// It holds for as long as the squad stays out of combat, so a revive used between fights (or before the
-		// first one) doesn't carry into the next fight either.
 		SettleUps(aNowMs);
 		if (m_CombatSinceMs == 0)
 		{
@@ -862,8 +953,6 @@ namespace Rezz
 			if (aNowMs >= m_OutOfCombatSinceMs + kRotationResetMs)
 			{
 				m_Tracker.ResetRotation();
-				// The engagement is over, so its stats are final. Same break as the rotation reset: arcdps ends a
-				// fight at every lull, and a squad would call that one fight.
 				if (m_Stats.Active())
 				{
 					FightStat fight;
@@ -878,9 +967,6 @@ namespace Rezz
 			}
 		}
 
-		// Anyone in the order who didn't come back after our own map change left while we were loading.
-		// Unofficial Extras reports a squad leave at once, even while we are loading, so this fallback is
-		// only needed when it isn't running.
 		if (m_ResyncAtMs != 0 && aNowMs >= m_ResyncAtMs)
 		{
 			m_ResyncAtMs = 0;
@@ -910,7 +996,6 @@ namespace Rezz
 
 	void Session::SetOrder(std::vector<std::string> aAccounts)
 	{
-		// Open places are positions in the order they were left from: a new order makes them meaningless.
 		if (aAccounts != m_Tracker.Order()) { m_Vacancies.clear(); }
 		m_Tracker.SetOrder(std::move(aAccounts));
 		m_OrderFrom.clear();
@@ -936,15 +1021,11 @@ namespace Rezz
 	{
 		Share::Message message = Share::Parse(aText);
 		if (message.What == Share::Kind::None) { return; }
-		// Our own paste: normally the order it names is already ours, but it may have been typed by hand or
-		// pasted from somewhere else, and then this is how we get it (field test 2026-09-17).
 		bool ours = !aAccount.empty() && aAccount == m_SelfAccount;
 
 		std::string name = DisplayAccount(aAccount);
 		if (message.What == Share::Kind::Remove)
 		{
-			// Taking yourself out needs nobody's approval, so every client does it and the order stays the same
-			// everywhere. Somebody who swapped off a revive build is the usual reason.
 			std::erase_if(m_Requests, [&](const JoinRequest& aRequest) { return aRequest.Account == aAccount; });
 			if (!InOrder(aAccount)) { return; }
 			int standing = SelfStanding(aNowMs);
@@ -959,7 +1040,7 @@ namespace Rezz
 			if (ours || !AnswersRequests()) { return; }
 			auto member = m_Roster.find(aAccount);
 			if (member == m_Roster.end() || !member->second.InSquad) { return; }
-			if (InOrder(aAccount)) { return; } // already in it: nothing to decide
+			if (InOrder(aAccount)) { return; }
 
 			auto waiting = std::find_if(m_Requests.begin(), m_Requests.end(),
 				[&](const JoinRequest& aRequest) { return aRequest.Account == aAccount; });
@@ -1008,10 +1089,8 @@ namespace Rezz
 		std::string what = name + " shared a revive order (" + std::to_string(resolved.Accounts.size()) + " players)";
 		if (!resolved.Unknown.empty()) { what += ", " + std::to_string(resolved.Unknown.size()) + " not in the squad"; }
 
-		// The squad's own leadership may set the order without being asked; anyone else has to be let in.
 		bool trusted = m_ShareFromAnyone ||
 			(m_ShareFromLeaders && (role == SquadRole::Leader || role == SquadRole::Lieutenant));
-		// Somebody answered a question that was going round the squad: nobody else needs to.
 		ClearRequest();
 
 		if (trusted)
@@ -1066,8 +1145,6 @@ namespace Rezz
 		if (m_AnswerRule == AnswerRule::Always) { return true; }
 		if (!m_Tracker.Order().empty()) { return OrderIsOurs(); }
 
-		// No order yet, so nobody owns one: the commander is asked to start it. If no commander is running the
-		// addon, their lieutenants are, which is as close to one client as the roster can tell us.
 		auto self = m_Roster.find(m_SelfAccount);
 		if (self == m_Roster.end()) { return false; }
 		if (self->second.Role == SquadRole::Leader) { return true; }
@@ -1083,8 +1160,6 @@ namespace Rezz
 		SessionView view;
 		view.HasShare = m_HasShare;
 		view.Share = m_Share;
-		// Unanswered requests stop asking after a while: by then the squad has moved on. Only one client is
-		// asked to answer, so one player asking doesn't open a window on every screen in the squad.
 		if (AnswersRequests())
 		{
 			for (const JoinRequest& request : m_Requests)
@@ -1103,7 +1178,6 @@ namespace Rezz
 		view.SelfCanRevive = SelfCanRevive(aNowMs);
 		for (const auto& [account, illusion] : m_Illusions)
 		{
-			// Our own Illusion of Life is no use to warn us about: we can't revive ourselves.
 			if (account == m_SelfAccount || illusion.EndsAt <= aNowMs) { continue; }
 			bool ourCast = !m_SelfAccount.empty() && illusion.Caster == m_SelfAccount;
 			view.Illusions.push_back(IllusionTarget{ account, illusion.EndsAt - aNowMs, ourCast });

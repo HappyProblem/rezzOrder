@@ -22,14 +22,16 @@ namespace Live
 	{
 		if (aData == nullptr || aData->Ev == nullptr) { return; }
 		uint8_t sc = aData->Ev->IsStatechange;
-		// Cheap filter before taking the lock: only these statechanges matter to the session. Buff removals are
-		// frequent, so of those only the end of Illusion of Life gets through.
-		bool illusionEnds = (sc == ArcDps::CBTS_BUFFREMOVE_ALL || sc == ArcDps::CBTS_BUFFREMOVE_SINGLE) &&
-			aData->Ev->SkillId == kIllusionOfLifeEffect;
-		if (!illusionEnds && sc != ArcDps::CBTS_ANIMATIONSTART && sc != ArcDps::CBTS_ANIMATIONSTOP && sc != ArcDps::CBTS_CHANGEDOWN &&
-			sc != ArcDps::CBTS_CHANGEUP && sc != ArcDps::CBTS_CHANGEDEAD && sc != ArcDps::CBTS_BUFFAPPLY &&
-			sc != ArcDps::CBTS_BUFFINITIAL && sc != ArcDps::CBTS_ENTERCOMBAT && sc != ArcDps::CBTS_SQCOMBATSTART &&
-			sc != ArcDps::CBTS_SQCOMBATEND)
+		uint32_t skillId = aData->Ev->SkillId;
+
+		bool trackedBuffRemove = (sc == ArcDps::CBTS_BUFFREMOVE_ALL || sc == ArcDps::CBTS_BUFFREMOVE_SINGLE) &&
+			(skillId == kIllusionOfLifeEffect || skillId == kSignetOfMercyPassive || skillId == kSignetOfUndeathPassive);
+
+		if (!trackedBuffRemove && sc != ArcDps::CBTS_COMBAT &&
+			sc != ArcDps::CBTS_ANIMATIONSTART && sc != ArcDps::CBTS_ANIMATIONSTOP &&
+			sc != ArcDps::CBTS_CHANGEDOWN && sc != ArcDps::CBTS_CHANGEUP && sc != ArcDps::CBTS_CHANGEDEAD &&
+			sc != ArcDps::CBTS_BUFFAPPLY && sc != ArcDps::CBTS_BUFFINITIAL &&
+			sc != ArcDps::CBTS_ENTERCOMBAT && sc != ArcDps::CBTS_SQCOMBATSTART && sc != ArcDps::CBTS_SQCOMBATEND)
 		{
 			return;
 		}
@@ -63,8 +65,6 @@ namespace Live
 	{
 		if (aMessage == nullptr || aMessage->AccountName == nullptr || aMessage->Text == nullptr) { return; }
 		std::string account = aMessage->AccountName;
-		// The text is null terminated, so its real length is measured rather than taken on trust: a wrong
-		// TextLength would otherwise read past the end of somebody else's buffer.
 		size_t length = ::strnlen(aMessage->Text, Rezz::Share::kMaxTextChars);
 		if (aMessage->TextLength > 0 && static_cast<size_t>(aMessage->TextLength) < length)
 		{
@@ -110,6 +110,20 @@ namespace Live
 	{
 		std::scoped_lock lock(s_Mutex);
 		s_Session.ClearRequest(aAccount);
+	}
+
+	void MarkPlayerUsed(const std::string& aAccount)
+	{
+		uint32_t now = timeGetTime();
+		std::scoped_lock lock(s_Mutex);
+		s_Session.MarkPlayerUsed(aAccount, now);
+	}
+
+	void MarkPlayerReady(const std::string& aAccount)
+	{
+		uint32_t now = timeGetTime();
+		std::scoped_lock lock(s_Mutex);
+		s_Session.MarkPlayerReady(aAccount, now);
 	}
 
 	void Tick()

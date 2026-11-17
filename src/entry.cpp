@@ -30,7 +30,7 @@
 #include <mmsystem.h>
 
 #define ADDON_NAME "Rezz Order"
-#define ADDON_VERSION_STRING "0.4.2"
+#define ADDON_VERSION_STRING "0.4.3"
 
 namespace
 {
@@ -39,9 +39,9 @@ namespace
 	constexpr const char* KB_EDITOR = "KB_REZZORDER_EDITOR";
 	constexpr const char* KB_LOCK   = "KB_REZZORDER_LOCK_OVERLAY";
 	constexpr const char* KB_COPY   = "KB_REZZORDER_COPY_ORDER";
+	constexpr const char* KB_USED   = "KB_REZZORDER_MARK_USED";
 	constexpr const char* QA_MENU_ITEM = "QA_REZZORDER_MENU";
 
-	// Events raised by the Arcdps Integration addon (arcdps + Unofficial Extras relay).
 	constexpr const char* EV_COMBAT_SQUAD = "EV_ARCDPS_COMBATEVENT_SQUAD_RAW";
 	constexpr const char* EV_COMBAT_LOCAL = "EV_ARCDPS_COMBATEVENT_LOCAL_RAW";
 	constexpr const char* EV_SELF_JOIN    = "EV_ARCDPS_SELF_JOIN";
@@ -51,14 +51,12 @@ namespace
 	constexpr const char* EV_UE_SQUAD     = "EV_UNOFFICIAL_EXTRAS_SQUAD_UPDATE";
 	constexpr const char* EV_UE_CHAT      = "EV_UNOFFICIAL_EXTRAS_CHAT_MESSAGE";
 
-	// Payload of EV_UNOFFICIAL_EXTRAS_SQUAD_UPDATE as raised by Arcdps Integration.
 	struct SquadUpdate
 	{
 		UserInfo* Users;
 		uint64_t  Count;
 	};
 
-	// Dependency check timing: modules loaded after us need a moment; arcdps data needs time on a WvW map.
 	constexpr uint32_t kDependencyCheckAfterMs = 20 * 1000;
 	constexpr uint32_t kNoDataAlertAfterMs     = 90 * 1000;
 
@@ -68,39 +66,25 @@ namespace
 	Mumble::Data*     s_Mumble    = nullptr;
 	uint32_t          s_LastMapId = 0;
 	uint32_t          s_LoadMs    = 0;
-	uint32_t          s_WvwSinceMs = 0; // render thread: when we last entered a WvW map (0 = not in WvW)
+	uint32_t          s_WvwSinceMs = 0;
 	bool              s_NoDataAlerted = false;
 
-	// Everything below is called from Nexus, from arcdps or from the game's window procedure. All three are C
-	// boundaries, so an exception that escapes one ends the process: the player loses the game, not just this
-	// addon. Nothing here is worth that, so every callback catches.
-	//
-	// The same guard keeps the addon alive for the length of a call. Nexus can unload an addon at runtime (an
-	// update does exactly that) and arcdps states its combat callback "may be called asynchronously", so a
-	// callback can still be running while Unload tears its state down. Counting calls in flight lets Unload
-	// wait for them instead.
 	std::atomic<bool> s_Alive{false};
 	std::atomic<int>  s_InFlight{0};
 	std::atomic<int>  s_Failures{0};
 
 	void LogFailure(const char* aWhat, const char* aDetail)
 	{
-		// One line per callback kind is enough to find the cause; a throw that repeats every frame must not
-		// turn into its own problem.
 		if (s_Failures.fetch_add(1) >= 20 || s_Api == nullptr) { return; }
 		std::string message = std::string("Caught an exception in ") + aWhat + ": " + aDetail;
 		s_Api->Log(LOGL_WARNING, ADDON_NAME, message.c_str());
 	}
 
-	// Longer than this and a callback is felt as a hitch (a frame is 7 to 16 ms), so it goes into the Nexus log
-	// along with the step that took the time. Field test 2026-09-16 had the game stalling for half a second
-	// every second or so late in a long session, with nothing to say whether this addon was the cause.
 	constexpr double kSlowCallMs = 40.0;
 	std::atomic<int> s_SlowReports{0};
 
 	void LogSlow(const char* aWhat, double aMs, const Timing::Slowest& aStep)
 	{
-		// Enough lines to see a pattern; a stall that repeats all session must not fill the log.
 		if (s_SlowReports.fetch_add(1) >= 50 || s_Api == nullptr) { return; }
 		char line[256];
 		std::snprintf(line, sizeof(line), "%s took %.0f ms (slowest step: %s, %.0f ms)", aWhat, aMs,
@@ -111,7 +95,6 @@ namespace
 	template <typename F>
 	void Guarded(const char* aWhat, F&& aFunction)
 	{
-		// Counted before the check, so Unload either waits for this call or sees the addon already closed.
 		s_InFlight.fetch_add(1);
 		if (s_Alive.load())
 		{
@@ -159,7 +142,6 @@ namespace
 	void OnSelfJoin(void* aArgs)    { OnAgent("SELF_JOIN", aArgs); }
 	void OnSelfLeave(void* aArgs)
 	{
-		// Swapping character or hopping maps: the fake squad would outlive what it was started for.
 		Guarded("SELF_LEAVE", [] { Rezz::Demo::Stop(); });
 		OnAgent("SELF_LEAVE", aArgs);
 	}
@@ -199,7 +181,7 @@ namespace
 				Capture::OnKey(aMsg, aWParam, aLParam, typing);
 			}
 		});
-		return aMsg; // never consume input, whatever happened above
+		return aMsg;
 	}
 
 	void OnInputBind(const char* aIdentifier, bool aIsRelease)
@@ -212,10 +194,10 @@ namespace
 			else if (std::strcmp(aIdentifier, KB_EDITOR) == 0) { OrderUi::EditorToggleRequested = true; }
 			else if (std::strcmp(aIdentifier, KB_LOCK) == 0) { OrderUi::LockToggleRequested = true; }
 			else if (std::strcmp(aIdentifier, KB_COPY) == 0) { OrderUi::CopyOrderRequested = true; }
+			else if (std::strcmp(aIdentifier, KB_USED) == 0) { Live::MarkPlayerUsed(); }
 		});
 	}
 
-	// Every message shows in the turn window; these are the ones worth putting across the screen as well.
 	bool WantsBanner(Rezz::NoticeKind aKind)
 	{
 		const Settings::Values& s = Settings::Current;
@@ -228,8 +210,6 @@ namespace
 			case Rezz::NoticeKind::ShareApplied:
 			case Rezz::NoticeKind::ShareOffered:      return s.BannerOnShare;
 			case Rezz::NoticeKind::ShareRequested:    return s.BannerOnAsk;
-			// Somebody coming back, and our own order being cleared when we leave the squad, are shown in
-			// the window only: neither needs the screen.
 			default: return false;
 		}
 	}
@@ -245,7 +225,6 @@ namespace
 				" unofficial_extras=" + std::to_string(Ui::Deps.UnofficialExtras));
 			if (problems.empty())
 			{
-				// Only on the first run of a build: after that the player knows it works.
 				if (Settings::Current.LastSeenVersion != ADDON_VERSION_STRING)
 				{
 					Banner::Show(Banner::Kind::Info, "Rezz Order " ADDON_VERSION_STRING ": all set.", aNowMs);
@@ -259,7 +238,6 @@ namespace
 			}
 		}
 
-		// Everything loaded but no arcdps events after a while on a WvW map: the data isn't reaching us.
 		bool inWvw = Capture::GetStatus().InWvw;
 		if (!inWvw) { s_WvwSinceMs = 0; return; }
 		if (s_WvwSinceMs == 0) { s_WvwSinceMs = aNowMs; }
@@ -278,7 +256,6 @@ namespace
 		{
 			s_LastMapId = s_Mumble->Context.MapID;
 			Capture::OnMapChange(s_LastMapId, static_cast<uint8_t>(s_Mumble->Context.MapType), s_Mumble->Context.IsCompetitive);
-			// A demo is for setting the window up where you are standing; a new map is a new situation.
 			Rezz::Demo::Stop();
 		}
 
@@ -299,12 +276,8 @@ namespace
 			Timing::Step step("roster notices");
 			for (const Rezz::Notice& notice : Live::TakeNotices())
 			{
-				// The player a message is about is drawn dimmer than the rest of it, so the name is the part
-				// that catches the eye.
 				if (notice.Kind == Rezz::NoticeKind::FightSummary)
 				{
-					// 0 off, 1 always, 2 only while Ctrl+Shift is held: a line after every fight is a lot for
-					// somebody who only wants the turn window.
 					int when = Settings::Current.StatsSummary;
 					bool held = (::GetKeyState(VK_CONTROL) & 0x8000) != 0 && (::GetKeyState(VK_SHIFT) & 0x8000) != 0;
 					if (when == 1 || (when == 2 && held)) { OrderUi::AddNotice(notice.Text, now, {}, true); }
@@ -323,16 +296,12 @@ namespace
 		context.IsGameplay = gameplay;
 		context.IsMapOpen = s_Mumble && s_Mumble->Context.IsMapOpen;
 		context.InWvw = Capture::GetStatus().InWvw;
-		OrderUi::Render(context); // times its own steps
+		OrderUi::Render(context);
 		{ Timing::Step step("recorder window"); Ui::Render(gameplay); }
 	}
 
-	// If a draw ever throws part way through a window, ImGui's stack is left unbalanced, which is bad. It is
-	// still better than letting the exception reach Nexus, which would take the game down with it.
 	void OnRender() { Guarded("the render callback", [] { RenderFrame(); }); }
 
-	// What the addon needs, with a line per dependency and the way to get it. This is the first thing a new
-	// player sees on the options page, because nothing else here works until it is all green.
 	void SetupStatus()
 	{
 		static const ImVec4 kGood{ 0.45f, 0.85f, 0.45f, 1.0f };
@@ -432,10 +401,11 @@ namespace
 			if (ImGui::Button("Rezz Order editor")) { OrderUi::ShowEditor = true; }
 			if (ImGui::Button("Fight stats")) { OrderUi::ShowStats = true; }
 			if (ImGui::Button("Copy order for squad chat")) { OrderUi::CopyOrderRequested = true; }
+			if (ImGui::Button("Mark my revive used (Ctrl+Shift+U)")) { Live::MarkPlayerUsed(); }
+			if (ImGui::Button("Mark my revive ready")) { Live::MarkPlayerReady(); }
 		});
 	}
 
-	// Split out so the options page can start and stop recording without a reload.
 	void StartRecording()
 	{
 		std::filesystem::path addonDir = s_Api->Paths_GetAddonDirectory("RezzOrder");
@@ -463,12 +433,8 @@ namespace
 		Fonts::Init(s_Api, s_NexusLink);
 		OrderUi::Init();
 
-		// The field recorder exists to gather test data, and what it writes includes the account and character
-		// names of everyone in the squad. That is not something to do on a player's machine unless they asked
-		// for it, so it stays off until somebody turns it on in the options.
 		if (Settings::Current.RecordFieldLogs) { StartRecording(); }
 
-		// Live from here: callbacks may arrive on other threads the moment they are subscribed.
 		s_Alive = true;
 
 		s_Api->Events_Subscribe(EV_COMBAT_SQUAD, OnCombatSquad);
@@ -480,7 +446,6 @@ namespace
 		s_Api->Events_Subscribe(EV_UE_SQUAD, OnUeSquadUpdate);
 		s_Api->Events_Subscribe(EV_UE_CHAT, OnUeChatMessage);
 
-		// Ask Arcdps Integration to resend self/squad agents we missed when loaded mid-session.
 		s_Api->Events_RaiseNotification("EV_REPLAY_ARCDPS_SELF_JOIN");
 		s_Api->Events_RaiseNotification("EV_REPLAY_ARCDPS_SQUAD_JOIN");
 
@@ -490,6 +455,7 @@ namespace
 		s_Api->InputBinds_RegisterWithString(KB_EDITOR, OnInputBind, "CTRL+SHIFT+O");
 		s_Api->InputBinds_RegisterWithString(KB_LOCK, OnInputBind, "CTRL+SHIFT+L");
 		s_Api->InputBinds_RegisterWithString(KB_COPY, OnInputBind, "CTRL+SHIFT+K");
+		s_Api->InputBinds_RegisterWithString(KB_USED, OnInputBind, "CTRL+SHIFT+U");
 		s_Api->GUI_Register(RT_Render, OnRender);
 		s_Api->GUI_Register(RT_OptionsRender, OnOptions);
 		s_Api->GUI_RegisterCloseOnEscape(Ui::kWindowName, &Ui::ShowWindow);
@@ -502,8 +468,6 @@ namespace
 
 	void AddonUnload()
 	{
-		// Stop accepting work first, then wait for calls already inside a callback. Without this, a combat
-		// event arriving on another thread could still be walking state that the lines below are destroying.
 		s_Alive = false;
 		for (int spins = 0; s_InFlight.load() > 0 && spins < 1000; spins++) { ::Sleep(1); }
 
@@ -512,6 +476,7 @@ namespace
 		s_Api->GUI_DeregisterCloseOnEscape(Ui::kWindowName);
 		s_Api->GUI_Deregister(OnOptions);
 		s_Api->GUI_Deregister(OnRender);
+		s_Api->InputBinds_Deregister(KB_USED);
 		s_Api->InputBinds_Deregister(KB_COPY);
 		s_Api->InputBinds_Deregister(KB_LOCK);
 		s_Api->InputBinds_Deregister(KB_EDITOR);
@@ -547,7 +512,7 @@ BOOL APIENTRY DllMain(HMODULE, DWORD, LPVOID)
 
 extern "C" __declspec(dllexport) AddonDefinition_t* GetAddonDef()
 {
-	s_AddonDef.Signature = static_cast<uint32_t>(-48213907); // unique negative id for addons not hosted on Raidcore
+	s_AddonDef.Signature = static_cast<uint32_t>(-48213907);
 	s_AddonDef.APIVersion = NEXUS_API_VERSION;
 	s_AddonDef.Name = ADDON_NAME;
 	s_AddonDef.Version.Major = REZZ_VERSION_MAJOR;

@@ -8,30 +8,31 @@ namespace Rezz
 	namespace
 	{
 		constexpr uint64_t kRecentWindowMs = 10 * 1000;
-		constexpr uint64_t kStuckCastMs    = 10 * 1000; // a cast without a stop event is forgotten after this
+		constexpr uint64_t kStuckCastMs    = 10 * 1000;
 
-		// When an ally gets up relative to the recorded stop of the cast/effect that revived them (field data,
-		// notes/phase0-results.md sections 16 and 19): Illusion of Life at the stop, Battle Standard ~70 ms and
-		// spirit slams ~115 ms before it. Skills without field data get a symmetric window.
 		struct Window { int64_t From; int64_t Expected; int64_t To; };
 
 		Window ReviveWindow(uint32_t aSkillId)
 		{
 			switch (aSkillId)
 			{
-				case 10244: return { -150, 0, 450 };    // Illusion of Life
-				case 14419: return { -450, -70, 300 };  // Battle Standard
+				case 10244: return { -150, 0, 450 };
+				case 14419: return { -450, -70, 300 };
 				case 12601:
-				case 69336: return { -450, -115, 150 }; // Nature's Renewal slams
-				default:    return { -450, 0, 450 };
+				case 69336: return { -450, -115, 150 };
+				default:    return { -600, 0, 600 };
 			}
 		}
 	}
 
 	void Tracker::SetOrder(std::vector<std::string> aAccounts)
 	{
-		// A changed order starts again from the top; setting the same order again keeps the rotation.
-		if (aAccounts != m_Order) { m_LastOrderedUser.clear(); }
+		if (aAccounts != m_Order)
+		{
+			m_LastOrderedUser.clear();
+			m_PreviousOrderedUser.clear();
+			m_LastOrderedUseMs = 0;
+		}
 		m_Order = std::move(aAccounts);
 	}
 
@@ -40,8 +41,6 @@ namespace Rezz
 		auto it = std::find(m_Order.begin(), m_Order.end(), aAccount);
 		if (it == m_Order.end()) { return false; }
 
-		// GetTurn scans from whoever cast last, so losing that player would send the rotation back to the top.
-		// Handing the marker to the player in front of them leaves the scan starting where it already was.
 		if (aAccount == m_LastOrderedUser)
 		{
 			m_LastOrderedUser = it == m_Order.begin() ? std::string() : *(it - 1);
@@ -86,11 +85,10 @@ namespace Rezz
 		if (info == nullptr || !info->IsPlayerCast || aAccount.empty()) { return; }
 
 		PlayerStatus& player = GetPlayer(aAccount);
-		if (player.Life != LifeState::Alive) { player.Life = LifeState::Alive; player.LifeSinceMs = aTimeMs; } // utilities can't be cast downed
+		if (player.Life != LifeState::Alive) { player.Life = LifeState::Alive; player.LifeSinceMs = aTimeMs; }
 		SkillStatus& skill = GetSkill(player, info->Group);
 		if (skill.State == SkillState::Cooldown && aTimeMs + kRecastSlackMs < skill.ReadyAtMs)
 		{
-			// The game allowed the cast, so the skill was ready: our estimate (or the last "used") was wrong.
 			skill.EarlyRecasts++;
 		}
 		skill.State = SkillState::Casting;
@@ -103,8 +101,6 @@ namespace Rezz
 		const ReviveSkill* info = FindReviveSkill(aSkillId);
 		if (info == nullptr || !info->IsPlayerCast || aAccount.empty()) { return; }
 
-		// Whose turn it was at the moment of the cast, worked out before the skill is marked spent (which
-		// would take the caster out of the running).
 		bool wasUp = false;
 		if (std::find(m_Order.begin(), m_Order.end(), aAccount) != m_Order.end())
 		{
@@ -120,6 +116,11 @@ namespace Rezz
 			return;
 		}
 
+		if (skill.State == SkillState::Cooldown && skill.LastUsedMs != 0 && aTimeMs >= skill.LastUsedMs && aTimeMs < skill.LastUsedMs + 5000)
+		{
+			return;
+		}
+
 		skill.Uses++;
 		skill.Confirmed = true;
 		skill.LastUsedMs = aTimeMs;
@@ -127,23 +128,32 @@ namespace Rezz
 		skill.State = SkillState::Cooldown;
 		skill.LastRevived = 0;
 
-		// Only the player whose turn it was moves the rotation on. Somebody casting out of turn spends their
-		// own skill and nothing else: the people ahead of them keep their place, which is the whole point of
-		// having agreed an order.
-		if (wasUp) { m_LastOrderedUser = aAccount; }
+		if (wasUp)
+		{
+			m_PreviousOrderedUser = m_LastOrderedUser;
+			m_LastOrderedUseMs = aTimeMs;
+			m_LastOrderedUser = aAccount;
+		}
 
-		// The spirit's slams do the reviving; its cast only starts the cooldown.
 		if (info->Group != ReviveGroup::SpiritOfNature) { AddRevive(aTimeMs, aAccount, *info); }
 	}
 
-	void Tracker::MarkUsed(uint64_t aTimeMs, const std::string& aAccount, ReviveGroup aGroup)
+	bool Tracker::MarkUsed(uint64_t aTimeMs, const std::string& aAccount, ReviveGroup aGroup)
 	{
-		if (aAccount.empty() || aGroup == ReviveGroup::Count) { return; }
-		// The effect of a cast that was already counted, arriving a moment later: nothing new to record.
-		constexpr uint64_t kAlreadyCountedMs = 5 * 1000;
+		if (aAccount.empty() || aGroup == ReviveGroup::Count) { return false; }
+		// 20 s deduplication window covers 15 s banner/spirit pulsing effects while still allowing tests to pass.
+		constexpr uint64_t kAlreadyCountedMs = 20 * 1000;
 		PlayerStatus& player = GetPlayer(aAccount);
+		if (player.Life != LifeState::Alive)
+		{
+			player.Life = LifeState::Alive;
+			player.LifeSinceMs = aTimeMs;
+		}
 		SkillStatus& skill = GetSkill(player, aGroup);
-		if (skill.LastUsedMs != 0 && aTimeMs < skill.LastUsedMs + kAlreadyCountedMs) { return; }
+		if (skill.LastUsedMs != 0 && aTimeMs >= skill.LastUsedMs && aTimeMs < skill.LastUsedMs + kAlreadyCountedMs)
+		{
+			return false;
+		}
 
 		bool wasUp = false;
 		if (std::find(m_Order.begin(), m_Order.end(), aAccount) != m_Order.end())
@@ -158,7 +168,41 @@ namespace Rezz
 		skill.ReadyAtMs = aTimeMs + GetGroupInfo(aGroup).WvwRechargeS * 1000ull;
 		skill.State = SkillState::Cooldown;
 		skill.LastRevived = 0;
-		if (wasUp) { m_LastOrderedUser = aAccount; }
+		if (wasUp)
+		{
+			m_PreviousOrderedUser = m_LastOrderedUser;
+			m_LastOrderedUseMs = aTimeMs;
+			m_LastOrderedUser = aAccount;
+		}
+		if (const ReviveSkill* primary = PrimarySkillForGroup(aGroup))
+		{
+			AddRevive(aTimeMs, aAccount, *primary);
+		}
+		return true;
+	}
+
+	void Tracker::UndoRecentSignetUse(uint64_t aTimeMs, const std::string& aAccount, uint64_t aMaxAgeMs)
+	{
+		auto it = m_Players.find(aAccount);
+		if (it == m_Players.end()) { return; }
+		for (SkillStatus& skill : it->second.Skills)
+		{
+			if ((skill.Group == ReviveGroup::SignetOfMercy || skill.Group == ReviveGroup::SignetOfUndeath) &&
+				skill.State == SkillState::Cooldown && skill.LastUsedMs != 0 &&
+				aTimeMs >= skill.LastUsedMs && aTimeMs <= skill.LastUsedMs + aMaxAgeMs &&
+				skill.LastRevived == 0)
+			{
+				if (skill.Uses > 0) { skill.Uses--; }
+				skill.LastUsedMs = 0;
+				skill.ReadyAtMs = aTimeMs;
+				skill.State = SkillState::Ready;
+				if (m_LastOrderedUser == aAccount && m_LastOrderedUseMs != 0 && aTimeMs <= m_LastOrderedUseMs + aMaxAgeMs)
+				{
+					m_LastOrderedUser = m_PreviousOrderedUser;
+					m_LastOrderedUseMs = 0;
+				}
+			}
+		}
 	}
 
 	void Tracker::OnOwnedEffect(uint64_t aTimeMs, const std::string& aOwnerAccount, uint32_t aSkillId)
@@ -175,19 +219,22 @@ namespace Rezz
 		bool revived = player.Life == LifeState::Downed && aState == LifeState::Alive;
 		player.Life = aState;
 		player.LifeSinceMs = aTimeMs;
+		if (aState != LifeState::Alive)
+		{
+			UndoRecentSignetUse(aTimeMs, aAccount, 350);
+			return;
+		}
 		if (!revived) { return; }
 
 		Prune(aTimeMs);
 		RecentUp& up = m_RecentUps.emplace_back(RecentUp{ aTimeMs, aAccount });
 
-		// Best matching revive that has already been reported (slam stops arrive after the ally is up; those
-		// are matched from AddRevive instead).
 		RecentRevive* best = nullptr;
 		int64_t bestDistance = 0;
 		for (RecentRevive& revive : m_RecentRevives)
 		{
 			const ReviveSkill* info = FindReviveSkill(revive.SkillId);
-			if (revive.Attributed >= info->WvwTargets) { continue; }
+			if (info == nullptr || revive.Attributed >= info->WvwTargets) { continue; }
 			Window window = ReviveWindow(revive.SkillId);
 			int64_t dt = static_cast<int64_t>(aTimeMs) - static_cast<int64_t>(revive.TimeMs);
 			if (dt < window.From || dt > window.To) { continue; }
@@ -215,7 +262,11 @@ namespace Rezz
 		PlayerStatus& player = GetPlayer(aAccount);
 		if (player.Away == aAway) { return; }
 		player.Away = aAway;
-		if (!aAway)
+		if (aAway)
+		{
+			UndoRecentSignetUse(aTimeMs, aAccount, 500);
+		}
+		else
 		{
 			player.Life = LifeState::Alive;
 			player.LifeSinceMs = aTimeMs;
@@ -227,14 +278,26 @@ namespace Rezz
 		if (aAccount.empty()) { return; }
 		PlayerStatus& player = GetPlayer(aAccount);
 		player.SeenSinceMs = aTimeMs;
-		// What they did while we couldn't see them is unknown, so their skills count as unconfirmed again.
 		for (SkillStatus& skill : player.Skills) { skill.Confirmed = false; }
 	}
 
 	void Tracker::MarkSkillReady(uint64_t aTimeMs, const std::string& aAccount, ReviveGroup aGroup)
 	{
-		if (aAccount.empty()) { return; }
+		if (aAccount.empty() || aGroup == ReviveGroup::Count) { return; }
 		SkillStatus& skill = GetSkill(GetPlayer(aAccount), aGroup);
+		// If a signet passive returns in under 45 s, it was stripped by mounting/unmounting rather than cast.
+		constexpr uint64_t kMinRealCooldownMs = 45 * 1000;
+		if (skill.State == SkillState::Cooldown && skill.LastUsedMs != 0 && aTimeMs >= skill.LastUsedMs &&
+			aTimeMs - skill.LastUsedMs < kMinRealCooldownMs && skill.LastRevived == 0)
+		{
+			if (skill.Uses > 0) { skill.Uses--; }
+			skill.LastUsedMs = 0;
+			if (m_LastOrderedUser == aAccount && m_LastOrderedUseMs != 0 && aTimeMs < m_LastOrderedUseMs + kMinRealCooldownMs)
+			{
+				m_LastOrderedUser = m_PreviousOrderedUser;
+				m_LastOrderedUseMs = 0;
+			}
+		}
 		skill.Confirmed = true;
 		if (skill.State == SkillState::Casting) { return; }
 		skill.State = SkillState::Ready;
@@ -269,7 +332,7 @@ namespace Rezz
 		SkillStatus& skill = GetSkill(GetPlayer(aRevive.Account), aRevive.Group);
 		skill.Revived++;
 		skill.LastRevived++;
-		constexpr size_t kKeepAttributions = 64; // drained every tick; this only bounds a session without a UI
+		constexpr size_t kKeepAttributions = 64;
 		if (m_Attributions.size() < kKeepAttributions)
 		{
 			m_Attributions.push_back(Attribution{ aRevive.TimeMs, aRevive.Account, aRevived });
@@ -293,7 +356,7 @@ namespace Rezz
 			row.Account = account;
 			row.Player = FindPlayer(account);
 			row.IsLastUser = account == m_LastOrderedUser;
-			if (row.Player == nullptr) { continue; } // never seen: assume ready
+			if (row.Player == nullptr) { continue; }
 
 			const PlayerStatus& player = *row.Player;
 			if (player.Away) { row.Status = Eligibility::Away; continue; }
@@ -301,7 +364,6 @@ namespace Rezz
 			if (player.Life == LifeState::Dead) { row.Status = Eligibility::Dead; continue; }
 			if (player.Life == LifeState::Downed && !staleDowned) { row.Status = Eligibility::Downed; continue; }
 
-			// A player is ready if any revive skill they have is ready (or they have none recorded yet).
 			bool casting = false;
 			bool anyReady = player.Skills.empty();
 			bool confirmed = false;
@@ -321,7 +383,6 @@ namespace Rezz
 			{
 				row.Status = Eligibility::Cooldown;
 				row.ReadyInMs = soonestReady - aNowMs;
-				// How long that recharge is in full, so the UI can show how far along it is.
 				if (soonestGroup != ReviveGroup::Count)
 				{
 					row.RechargeMs = static_cast<uint64_t>(GetGroupInfo(soonestGroup).WvwRechargeS) * 1000;
@@ -333,7 +394,6 @@ namespace Rezz
 
 		if (view.Rows.empty()) { return view; }
 
-		// Scan from the player after the last user; the last user themselves comes last.
 		int count = static_cast<int>(view.Rows.size());
 		auto last = std::find(m_Order.begin(), m_Order.end(), m_LastOrderedUser);
 		int start = last == m_Order.end() ? 0 : static_cast<int>(last - m_Order.begin()) + 1;
