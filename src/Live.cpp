@@ -14,30 +14,54 @@ namespace Live
 {
 	namespace
 	{
-		std::mutex    s_Mutex;
-		Rezz::Session s_Session;
+		constexpr uint8_t CBTS_BUFFACTIVE = 28;
+		std::mutex        s_Mutex;
+		Rezz::Session     s_Session;
+
+		bool IsRelevantCombatEvent(const ArcDps::EvCombatData* aData)
+		{
+			if (aData == nullptr || aData->Ev == nullptr) { return false; }
+			uint8_t sc = aData->Ev->IsStatechange;
+			uint32_t skillId = aData->Ev->SkillId;
+
+			if (sc == ArcDps::CBTS_BUFFREMOVE_ALL || sc == ArcDps::CBTS_BUFFREMOVE_SINGLE)
+			{
+				return skillId == kIllusionOfLifeEffect ||
+					skillId == kSignetOfMercyPassive ||
+					skillId == kSignetOfUndeathPassive ||
+					FindReviveSkill(skillId) != nullptr;
+			}
+
+			return sc == ArcDps::CBTS_COMBAT ||
+				sc == CBTS_BUFFACTIVE ||
+				sc == ArcDps::CBTS_BUFFCHANGE ||
+				sc == ArcDps::CBTS_ANIMATIONSTART ||
+				sc == ArcDps::CBTS_ANIMATIONSTOP ||
+				sc == ArcDps::CBTS_CHANGEDOWN ||
+				sc == ArcDps::CBTS_CHANGEUP ||
+				sc == ArcDps::CBTS_CHANGEDEAD ||
+				sc == ArcDps::CBTS_BUFFAPPLY ||
+				sc == ArcDps::CBTS_BUFFINITIAL ||
+				sc == ArcDps::CBTS_ENTERCOMBAT ||
+				sc == ArcDps::CBTS_SQCOMBATSTART ||
+				sc == ArcDps::CBTS_SQCOMBATEND;
+		}
 	}
 
 	void OnCombatSquad(const ArcDps::EvCombatData* aData)
 	{
-		if (aData == nullptr || aData->Ev == nullptr) { return; }
-		uint8_t sc = aData->Ev->IsStatechange;
-		uint32_t skillId = aData->Ev->SkillId;
-
-		bool trackedBuffRemove = (sc == ArcDps::CBTS_BUFFREMOVE_ALL || sc == ArcDps::CBTS_BUFFREMOVE_SINGLE) &&
-			(skillId == kIllusionOfLifeEffect || skillId == kSignetOfMercyPassive || skillId == kSignetOfUndeathPassive);
-
-		if (!trackedBuffRemove && sc != ArcDps::CBTS_COMBAT &&
-			sc != ArcDps::CBTS_ANIMATIONSTART && sc != ArcDps::CBTS_ANIMATIONSTOP &&
-			sc != ArcDps::CBTS_CHANGEDOWN && sc != ArcDps::CBTS_CHANGEUP && sc != ArcDps::CBTS_CHANGEDEAD &&
-			sc != ArcDps::CBTS_BUFFAPPLY && sc != ArcDps::CBTS_BUFFINITIAL &&
-			sc != ArcDps::CBTS_ENTERCOMBAT && sc != ArcDps::CBTS_SQCOMBATSTART && sc != ArcDps::CBTS_SQCOMBATEND)
-		{
-			return;
-		}
+		if (!IsRelevantCombatEvent(aData)) { return; }
 		uint32_t now = timeGetTime();
 		std::scoped_lock lock(s_Mutex);
-		s_Session.OnCombat(*aData, now);
+		s_Session.OnCombat(*aData, now, false);
+	}
+
+	void OnCombatLocal(const ArcDps::EvCombatData* aData)
+	{
+		if (!IsRelevantCombatEvent(aData)) { return; }
+		uint32_t now = timeGetTime();
+		std::scoped_lock lock(s_Mutex);
+		s_Session.OnCombat(*aData, now, true);
 	}
 
 	void OnAgentUpdate(const ArcDps::EvAgentUpdate* aUpdate)

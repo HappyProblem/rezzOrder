@@ -13,6 +13,7 @@ struct SquadMessageInfo;
 namespace Live
 {
 	void OnCombatSquad(const ArcDps::EvCombatData* aData);
+	void OnCombatLocal(const ArcDps::EvCombatData* aData);
 	void OnAgentUpdate(const ArcDps::EvAgentUpdate* aUpdate);
 	void OnSquadUpdate(const UserInfo* aUsers, uint64_t aCount);
 	void OnChatMessage(const SquadMessageInfo* aMessage);

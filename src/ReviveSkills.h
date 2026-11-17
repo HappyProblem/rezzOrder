@@ -21,10 +21,10 @@ struct ReviveGroupInfo
 };
 
 inline constexpr ReviveGroupInfo kReviveGroups[static_cast<int>(ReviveGroup::Count)] = {
-	{ "Signet of Mercy",   "Guardian",     90  },
-	{ "Glyph of Renewal",  "Elementalist", 90  },
-	{ "Illusion of Life",  "Mesmer",       90  },
-	{ "Signet of Undeath", "Necromancer",  75  },
+	{ "Signet of Mercy",   "Guardian",     90 },
+	{ "Glyph of Renewal",  "Elementalist", 90 },
+	{ "Illusion of Life",  "Mesmer",       90 },
+	{ "Signet of Undeath", "Necromancer",  75 },
 	{ "Battle Standard",   "Warrior",      120 },
 	{ "Spirit of Nature",  "Ranger",       120 },
 };
@@ -57,16 +57,18 @@ inline constexpr ReviveSkill kReviveSkills[] = {
 	{ 10611, "Signet of Undeath",             ReviveGroup::SignetOfUndeath, true,  1, 1500 },
 	{ 14419, "Battle Standard",               ReviveGroup::BattleStandard,  true,  3, 2000 },
 	{ 12569, "Spirit of Nature",              ReviveGroup::SpiritOfNature,  true,  2, 1500 },
-	{ 12601, "Nature's Renewal",              ReviveGroup::SpiritOfNature,  false, 2, 750  },
-	{ 69336, "Nature's Renewal (2nd slam)",   ReviveGroup::SpiritOfNature,  false, 2, 750  },
+	{ 69381, "Spirit of Nature (summon)",     ReviveGroup::SpiritOfNature,  true,  2, 1500 },
+	{ 12601, "Nature's Renewal",              ReviveGroup::SpiritOfNature,  false, 2, 750 },
+	{ 69336, "Nature's Renewal (2nd slam)",   ReviveGroup::SpiritOfNature,  false, 2, 750 },
 };
 
-inline constexpr uint32_t kSignetOfMercyPassive   = 9162;
+inline constexpr uint32_t kSignetOfMercyPassive = 9162;
 inline constexpr uint32_t kSignetOfUndeathPassive = 10610;
-inline constexpr uint32_t kRenewalOfFireBuff      = 5764;
-inline constexpr uint32_t kRenewalOfAirBuff       = 5765;
-inline constexpr uint32_t kResurrectionBuff       = 848;
-inline constexpr uint32_t kIllusionOfLifeEffect   = 10346;
+inline constexpr uint32_t kRenewalOfFireBuff = 5764;
+inline constexpr uint32_t kRenewalOfAirBuff = 5765;
+inline constexpr uint32_t kResurrectionBuff = 848;
+inline constexpr uint32_t kIllusionOfLifeEffect = 10346;
+inline constexpr uint32_t kSpiritOfNatureSpecies = 6649;
 
 const ReviveSkill* FindReviveSkill(uint32_t aSkillId);
 const ReviveSkill* PrimarySkillForGroup(ReviveGroup aGroup);

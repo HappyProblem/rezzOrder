@@ -30,26 +30,26 @@
 #include <mmsystem.h>
 
 #define ADDON_NAME "Rezz Order"
-#define ADDON_VERSION_STRING "0.4.3"
+#define ADDON_VERSION_STRING "0.4.4"
 
 namespace
 {
 	constexpr const char* KB_TOGGLE = "KB_REZZORDER_TOGGLE";
-	constexpr const char* KB_MARK   = "KB_REZZORDER_MARK";
+	constexpr const char* KB_MARK = "KB_REZZORDER_MARK";
 	constexpr const char* KB_EDITOR = "KB_REZZORDER_EDITOR";
-	constexpr const char* KB_LOCK   = "KB_REZZORDER_LOCK_OVERLAY";
-	constexpr const char* KB_COPY   = "KB_REZZORDER_COPY_ORDER";
-	constexpr const char* KB_USED   = "KB_REZZORDER_MARK_USED";
+	constexpr const char* KB_LOCK = "KB_REZZORDER_LOCK_OVERLAY";
+	constexpr const char* KB_COPY = "KB_REZZORDER_COPY_ORDER";
+	constexpr const char* KB_USED = "KB_REZZORDER_MARK_USED";
 	constexpr const char* QA_MENU_ITEM = "QA_REZZORDER_MENU";
 
 	constexpr const char* EV_COMBAT_SQUAD = "EV_ARCDPS_COMBATEVENT_SQUAD_RAW";
 	constexpr const char* EV_COMBAT_LOCAL = "EV_ARCDPS_COMBATEVENT_LOCAL_RAW";
-	constexpr const char* EV_SELF_JOIN    = "EV_ARCDPS_SELF_JOIN";
-	constexpr const char* EV_SELF_LEAVE   = "EV_ARCDPS_SELF_LEAVE";
-	constexpr const char* EV_SQUAD_JOIN   = "EV_ARCDPS_SQUAD_JOIN";
-	constexpr const char* EV_SQUAD_LEAVE  = "EV_ARCDPS_SQUAD_LEAVE";
-	constexpr const char* EV_UE_SQUAD     = "EV_UNOFFICIAL_EXTRAS_SQUAD_UPDATE";
-	constexpr const char* EV_UE_CHAT      = "EV_UNOFFICIAL_EXTRAS_CHAT_MESSAGE";
+	constexpr const char* EV_SELF_JOIN = "EV_ARCDPS_SELF_JOIN";
+	constexpr const char* EV_SELF_LEAVE = "EV_ARCDPS_SELF_LEAVE";
+	constexpr const char* EV_SQUAD_JOIN = "EV_ARCDPS_SQUAD_JOIN";
+	constexpr const char* EV_SQUAD_LEAVE = "EV_ARCDPS_SQUAD_LEAVE";
+	constexpr const char* EV_UE_SQUAD = "EV_UNOFFICIAL_EXTRAS_SQUAD_UPDATE";
+	constexpr const char* EV_UE_CHAT = "EV_UNOFFICIAL_EXTRAS_CHAT_MESSAGE";
 
 	struct SquadUpdate
 	{
@@ -58,20 +58,20 @@ namespace
 	};
 
 	constexpr uint32_t kDependencyCheckAfterMs = 20 * 1000;
-	constexpr uint32_t kNoDataAlertAfterMs     = 90 * 1000;
+	constexpr uint32_t kNoDataAlertAfterMs = 90 * 1000;
 
 	AddonDefinition_t s_AddonDef{};
-	AddonAPI_t*       s_Api       = nullptr;
-	NexusLinkData_t*  s_NexusLink = nullptr;
-	Mumble::Data*     s_Mumble    = nullptr;
+	AddonAPI_t* s_Api = nullptr;
+	NexusLinkData_t* s_NexusLink = nullptr;
+	Mumble::Data* s_Mumble = nullptr;
 	uint32_t          s_LastMapId = 0;
-	uint32_t          s_LoadMs    = 0;
+	uint32_t          s_LoadMs = 0;
 	uint32_t          s_WvwSinceMs = 0;
 	bool              s_NoDataAlerted = false;
 
-	std::atomic<bool> s_Alive{false};
-	std::atomic<int>  s_InFlight{0};
-	std::atomic<int>  s_Failures{0};
+	std::atomic<bool> s_Alive{ false };
+	std::atomic<int>  s_InFlight{ 0 };
+	std::atomic<int>  s_Failures{ 0 };
 
 	void LogFailure(const char* aWhat, const char* aDetail)
 	{
@@ -81,7 +81,7 @@ namespace
 	}
 
 	constexpr double kSlowCallMs = 40.0;
-	std::atomic<int> s_SlowReports{0};
+	std::atomic<int> s_SlowReports{ 0 };
 
 	void LogSlow(const char* aWhat, double aMs, const Timing::Slowest& aStep)
 	{
@@ -100,9 +100,9 @@ namespace
 		{
 			Timing::Reset();
 			auto start = std::chrono::steady_clock::now();
-			try                             { aFunction(); }
+			try { aFunction(); }
 			catch (const std::exception& e) { LogFailure(aWhat, e.what()); }
-			catch (...)                     { LogFailure(aWhat, "unknown exception"); }
+			catch (...) { LogFailure(aWhat, "unknown exception"); }
 			double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
 			if (ms >= kSlowCallMs) { LogSlow(aWhat, ms, Timing::Current()); }
 		}
@@ -114,88 +114,90 @@ namespace
 	void OnCombatSquad(void* aArgs)
 	{
 		Guarded("the squad combat event", [aArgs]
-		{
-			auto* data = static_cast<ArcDps::EvCombatData*>(aArgs);
-			{ Timing::Step step("session"); Live::OnCombatSquad(data); }
-			{ Timing::Step step("field recorder"); Capture::OnCombat(Capture::CH_SQUAD, data); }
-		});
+			{
+				auto* data = static_cast<ArcDps::EvCombatData*>(aArgs);
+				{ Timing::Step step("session"); Live::OnCombatSquad(data); }
+				{ Timing::Step step("field recorder"); Capture::OnCombat(Capture::CH_SQUAD, data); }
+			});
 	}
 
 	void OnCombatLocal(void* aArgs)
 	{
 		Guarded("the local combat event", [aArgs]
-		{
-			Capture::OnCombat(Capture::CH_LOCAL, static_cast<ArcDps::EvCombatData*>(aArgs));
-		});
+			{
+				auto* data = static_cast<ArcDps::EvCombatData*>(aArgs);
+				{ Timing::Step step("session local"); Live::OnCombatLocal(data); }
+				{ Timing::Step step("field recorder"); Capture::OnCombat(Capture::CH_LOCAL, data); }
+			});
 	}
 
 	void OnAgent(const char* aName, void* aArgs)
 	{
 		Guarded(aName, [aName, aArgs]
-		{
-			auto* update = static_cast<ArcDps::EvAgentUpdate*>(aArgs);
-			Live::OnAgentUpdate(update);
-			Capture::OnAgentUpdate(aName, update);
-		});
+			{
+				auto* update = static_cast<ArcDps::EvAgentUpdate*>(aArgs);
+				Live::OnAgentUpdate(update);
+				Capture::OnAgentUpdate(aName, update);
+			});
 	}
 
-	void OnSelfJoin(void* aArgs)    { OnAgent("SELF_JOIN", aArgs); }
+	void OnSelfJoin(void* aArgs) { OnAgent("SELF_JOIN", aArgs); }
 	void OnSelfLeave(void* aArgs)
 	{
 		Guarded("SELF_LEAVE", [] { Rezz::Demo::Stop(); });
 		OnAgent("SELF_LEAVE", aArgs);
 	}
-	void OnSquadJoin(void* aArgs)   { OnAgent("SQUAD_JOIN", aArgs); }
-	void OnSquadLeave(void* aArgs)  { OnAgent("SQUAD_LEAVE", aArgs); }
+	void OnSquadJoin(void* aArgs) { OnAgent("SQUAD_JOIN", aArgs); }
+	void OnSquadLeave(void* aArgs) { OnAgent("SQUAD_LEAVE", aArgs); }
 
 	void OnUeSquadUpdate(void* aArgs)
 	{
 		Guarded("the squad update", [aArgs]
-		{
-			if (auto* update = static_cast<SquadUpdate*>(aArgs))
 			{
-				Live::OnSquadUpdate(update->Users, update->Count);
-				Capture::OnSquadUpdate(update->Users, update->Count);
-			}
-		});
+				if (auto* update = static_cast<SquadUpdate*>(aArgs))
+				{
+					Live::OnSquadUpdate(update->Users, update->Count);
+					Capture::OnSquadUpdate(update->Users, update->Count);
+				}
+			});
 	}
 
 	void OnUeChatMessage(void* aArgs)
 	{
 		Guarded("the chat message", [aArgs]
-		{
-			auto* message = static_cast<SquadMessageInfo*>(aArgs);
-			Live::OnChatMessage(message);
-			Capture::OnChatMessage(message);
-		});
+			{
+				auto* message = static_cast<SquadMessageInfo*>(aArgs);
+				Live::OnChatMessage(message);
+				Capture::OnChatMessage(message);
+			});
 	}
 
 	UINT OnWndProc(HWND, UINT aMsg, WPARAM aWParam, LPARAM aLParam)
 	{
 		Guarded("the window procedure", [aMsg, aWParam, aLParam]
-		{
-			if (aMsg == WM_KEYDOWN || aMsg == WM_SYSKEYDOWN || aMsg == WM_XBUTTONDOWN || aMsg == WM_MBUTTONDOWN)
 			{
-				bool typing = Ui::TextInputActive || OrderUi::TextInputActive ||
-					(s_Mumble && s_Mumble->Context.IsTextboxFocused);
-				Capture::OnKey(aMsg, aWParam, aLParam, typing);
-			}
-		});
+				if (aMsg == WM_KEYDOWN || aMsg == WM_SYSKEYDOWN || aMsg == WM_XBUTTONDOWN || aMsg == WM_MBUTTONDOWN)
+				{
+					bool typing = Ui::TextInputActive || OrderUi::TextInputActive ||
+						(s_Mumble && s_Mumble->Context.IsTextboxFocused);
+					Capture::OnKey(aMsg, aWParam, aLParam, typing);
+				}
+			});
 		return aMsg;
 	}
 
 	void OnInputBind(const char* aIdentifier, bool aIsRelease)
 	{
 		Guarded("the input bind", [aIdentifier, aIsRelease]
-		{
-			if (aIsRelease) { return; }
-			if (std::strcmp(aIdentifier, KB_TOGGLE) == 0) { Ui::ToggleRequested = true; }
-			else if (std::strcmp(aIdentifier, KB_MARK) == 0) { Ui::MarkRequested = true; }
-			else if (std::strcmp(aIdentifier, KB_EDITOR) == 0) { OrderUi::EditorToggleRequested = true; }
-			else if (std::strcmp(aIdentifier, KB_LOCK) == 0) { OrderUi::LockToggleRequested = true; }
-			else if (std::strcmp(aIdentifier, KB_COPY) == 0) { OrderUi::CopyOrderRequested = true; }
-			else if (std::strcmp(aIdentifier, KB_USED) == 0) { Live::MarkPlayerUsed(); }
-		});
+			{
+				if (aIsRelease) { return; }
+				if (std::strcmp(aIdentifier, KB_TOGGLE) == 0) { Ui::ToggleRequested = true; }
+				else if (std::strcmp(aIdentifier, KB_MARK) == 0) { Ui::MarkRequested = true; }
+				else if (std::strcmp(aIdentifier, KB_EDITOR) == 0) { OrderUi::EditorToggleRequested = true; }
+				else if (std::strcmp(aIdentifier, KB_LOCK) == 0) { OrderUi::LockToggleRequested = true; }
+				else if (std::strcmp(aIdentifier, KB_COPY) == 0) { OrderUi::CopyOrderRequested = true; }
+				else if (std::strcmp(aIdentifier, KB_USED) == 0) { Live::MarkPlayerUsed(); }
+			});
 	}
 
 	bool WantsBanner(Rezz::NoticeKind aKind)
@@ -203,14 +205,14 @@ namespace
 		const Settings::Values& s = Settings::Current;
 		switch (aKind)
 		{
-			case Rezz::NoticeKind::LeftSquad:
-			case Rezz::NoticeKind::LeftMap:
-			case Rezz::NoticeKind::Substituted:       return s.BannerOnLeave;
-			case Rezz::NoticeKind::ChangedProfession: return s.BannerOnSwap;
-			case Rezz::NoticeKind::ShareApplied:
-			case Rezz::NoticeKind::ShareOffered:      return s.BannerOnShare;
-			case Rezz::NoticeKind::ShareRequested:    return s.BannerOnAsk;
-			default: return false;
+		case Rezz::NoticeKind::LeftSquad:
+		case Rezz::NoticeKind::LeftMap:
+		case Rezz::NoticeKind::Substituted:       return s.BannerOnLeave;
+		case Rezz::NoticeKind::ChangedProfession: return s.BannerOnSwap;
+		case Rezz::NoticeKind::ShareApplied:
+		case Rezz::NoticeKind::ShareOffered:      return s.BannerOnShare;
+		case Rezz::NoticeKind::ShareRequested:    return s.BannerOnAsk;
+		default: return false;
 		}
 	}
 
@@ -370,40 +372,41 @@ namespace
 	void OnOptions()
 	{
 		Guarded("the options page", []
-		{
-		SetupStatus();
-		OrderUi::Options();
-		ImGui::Separator();
-		if (ImGui::CollapsingHeader("Field recorder (testing)"))
-		{
-			bool record = Settings::Current.RecordFieldLogs;
-			if (ImGui::Checkbox("Record a field log while in WvW", &record))
 			{
-				Settings::Current.RecordFieldLogs = record;
-				Settings::MarkDirty();
-				if (record) { StartRecording(); } else { Capture::Stop(); }
-			}
-			if (ImGui::IsItemHovered())
-			{
-				ImGui::SetTooltip("%s", "Writes a CSV of combat events to the addon's logs folder, for working "
-					"out why tracking went wrong. It includes the account and character names of everyone in "
-					"your squad, so leave it off unless you mean to send one in.");
-			}
-			Ui::Options();
-		}
-		});
+				SetupStatus();
+				OrderUi::Options();
+				ImGui::Separator();
+				if (ImGui::CollapsingHeader("Field recorder (testing)"))
+				{
+					bool record = Settings::Current.RecordFieldLogs;
+					if (ImGui::Checkbox("Record a field log while in WvW", &record))
+					{
+						Settings::Current.RecordFieldLogs = record;
+						Settings::MarkDirty();
+						if (record) { StartRecording(); }
+						else { Capture::Stop(); }
+					}
+					if (ImGui::IsItemHovered())
+					{
+						ImGui::SetTooltip("%s", "Writes a CSV of combat events to the addon's logs folder, for working "
+							"out why tracking went wrong. It includes the account and character names of everyone in "
+							"your squad, so leave it off unless you mean to send one in.");
+					}
+					Ui::Options();
+				}
+			});
 	}
 
 	void OnQuickAccessMenu()
 	{
 		Guarded("the quick access menu", []
-		{
-			if (ImGui::Button("Rezz Order editor")) { OrderUi::ShowEditor = true; }
-			if (ImGui::Button("Fight stats")) { OrderUi::ShowStats = true; }
-			if (ImGui::Button("Copy order for squad chat")) { OrderUi::CopyOrderRequested = true; }
-			if (ImGui::Button("Mark my revive used (Ctrl+Shift+U)")) { Live::MarkPlayerUsed(); }
-			if (ImGui::Button("Mark my revive ready")) { Live::MarkPlayerReady(); }
-		});
+			{
+				if (ImGui::Button("Rezz Order editor")) { OrderUi::ShowEditor = true; }
+				if (ImGui::Button("Fight stats")) { OrderUi::ShowStats = true; }
+				if (ImGui::Button("Copy order for squad chat")) { OrderUi::CopyOrderRequested = true; }
+				if (ImGui::Button("Mark my revive used (Ctrl+Shift+U)")) { Live::MarkPlayerUsed(); }
+				if (ImGui::Button("Mark my revive ready")) { Live::MarkPlayerReady(); }
+			});
 	}
 
 	void StartRecording()
