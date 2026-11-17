@@ -27,7 +27,7 @@ for questions.
 
 ## Install
 
-**[Download the latest RezzOrder.dll](https://github.com/qq1ng/rezzOrder/releases/latest)**, then:
+**[Download the latest RezzOrder.dll](https://github.com/HappyProblem/rezzOrder/releases/latest)**, then:
 
 1. **Nexus.** Get it from [raidcore.gg/Nexus](https://raidcore.gg/Nexus) and install it into your Guild Wars
    2 folder. Nexus is the addon loader everything else sits on.
