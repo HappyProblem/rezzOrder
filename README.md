@@ -1,3 +1,5 @@
+This fork is a small fix to be keep the addon running as at 18.11.2026. The bulk of the work was done and should be attributed to the original creator, qq1ng.
+
 # Rezz Order
 
 > ## Discontinued
