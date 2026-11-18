@@ -4,9 +4,14 @@
 
 #include "Arc.h"
 
-bool CountsAsUsed(const ReviveSkill& aSkill, uint8_t aStopReason, int32_t aBaseMs)
+bool CountsAsUsed(const ReviveSkill& aSkill, uint8_t aStopReason, int32_t aBaseMs, int32_t aScaledMs, uint8_t aActivation)
 {
-	return aStopReason == ArcDps::ANIMSTOP_RETURN_CONTROL || aBaseMs >= aSkill.CastMs;
+	if (aStopReason == ArcDps::ANIMSTOP_RETURN_CONTROL || aActivation == ArcDps::ACTV_RESET)
+	{
+		return true;
+	}
+	int32_t effectiveMs = aBaseMs > 0 ? aBaseMs : aScaledMs;
+	return effectiveMs >= aSkill.CastMs;
 }
 
 uint8_t GroupTargets(ReviveGroup aGroup)
@@ -37,13 +42,13 @@ ReviveGroup DefaultGroupForProfession(uint32_t aProfession)
 {
 	switch (aProfession)
 	{
-		case 1: return ReviveGroup::SignetOfMercy;
-		case 2: return ReviveGroup::BattleStandard;
-		case 4: return ReviveGroup::SpiritOfNature;
-		case 6: return ReviveGroup::GlyphOfRenewal;
-		case 7: return ReviveGroup::IllusionOfLife;
-		case 8: return ReviveGroup::SignetOfUndeath;
-		default: return ReviveGroup::Count;
+	case 1: return ReviveGroup::SignetOfMercy;
+	case 2: return ReviveGroup::BattleStandard;
+	case 4: return ReviveGroup::SpiritOfNature;
+	case 6: return ReviveGroup::GlyphOfRenewal;
+	case 7: return ReviveGroup::IllusionOfLife;
+	case 8: return ReviveGroup::SignetOfUndeath;
+	default: return ReviveGroup::Count;
 	}
 }
 

@@ -154,8 +154,9 @@ namespace Rezz
 			uint8_t  Mask = 0;
 		};
 
-		uint64_t NormalizeEventTime(uint64_t aEventTime, uint64_t aNowMs, bool aIsLocal);
-		void EnsureSelfRegistered(const ArcDps::Agent* aAgent, uint16_t aInstId, uint64_t aNowMs);
+		uint64_t NormalizeEventTime(uint64_t aEventTime, uint64_t aNowMs);
+		void UpdateSelfAgent(const ArcDps::Agent* aAgent, uint16_t aInstId);
+		void RecordBackupSkillUse(uint64_t aTimeMs, const std::string& aAccount, ReviveGroup aGroup);
 		std::string ResolveAccount(uint64_t aId, uint16_t aInstanceId);
 		std::string AccountByInstance(uint16_t aInstanceId) const;
 		RosterMember& GetMember(const std::string& aAccount);
@@ -166,7 +167,6 @@ namespace Rezz
 		int SelfStanding(uint64_t aNowMs) const;
 		std::string StandingChange(int aBefore, int aAfter) const;
 		void OnSelfLeftSquad();
-		void RecordSkillUse(uint64_t aTimeMs, const std::string& aAccount, ReviveGroup aGroup);
 		FightStats::Chance ChanceNow(uint64_t aTimeMs) const;
 		void SettleUps(uint64_t aNowMs);
 		void TakeAttributions();
@@ -187,7 +187,7 @@ namespace Rezz
 		std::unordered_map<uint64_t, uint64_t>           m_Aliases;
 		std::unordered_map<uint64_t, MinionBoonState>    m_MinionBoons;
 		uint64_t                                         m_ClockOffsetMs = 0;
-		bool                                             m_HasLocalOffset = false;
+		bool                                             m_HasClockOffset = false;
 		std::deque<PendingLeave>                         m_PendingLeaves;
 		std::unordered_map<std::string, bool>            m_Reported;
 		std::vector<Notice>                              m_Notices;

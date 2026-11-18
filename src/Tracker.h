@@ -15,25 +15,25 @@ namespace Rezz
 
 	struct SkillStatus
 	{
-		ReviveGroup Group        = ReviveGroup::Count;
-		SkillState  State        = SkillState::Ready;
-		uint64_t    CastStartMs  = 0;
-		uint64_t    LastUsedMs   = 0;
-		uint64_t    ReadyAtMs    = 0;
-		uint32_t    Uses         = 0;
-		uint32_t    Cancels      = 0;
-		uint32_t    Revived      = 0;
-		uint32_t    LastRevived  = 0;
+		ReviveGroup Group = ReviveGroup::Count;
+		SkillState  State = SkillState::Ready;
+		uint64_t    CastStartMs = 0;
+		uint64_t    LastUsedMs = 0;
+		uint64_t    ReadyAtMs = 0;
+		uint32_t    Uses = 0;
+		uint32_t    Cancels = 0;
+		uint32_t    Revived = 0;
+		uint32_t    LastRevived = 0;
 		uint32_t    EarlyRecasts = 0;
-		bool        Confirmed    = false;
+		bool        Confirmed = false;
 	};
 
 	struct PlayerStatus
 	{
 		std::string              Account;
-		LifeState                Life        = LifeState::Alive;
+		LifeState                Life = LifeState::Alive;
 		uint64_t                 LifeSinceMs = 0;
-		bool                     Away        = false;
+		bool                     Away = false;
 		uint64_t                 SeenSinceMs = 0;
 		std::vector<SkillStatus> Skills;
 	};
@@ -50,11 +50,11 @@ namespace Rezz
 	struct OrderRow
 	{
 		std::string         Account;
-		const PlayerStatus* Player    = nullptr;
-		Eligibility         Status    = Eligibility::Ready;
+		const PlayerStatus* Player = nullptr;
+		Eligibility         Status = Eligibility::Ready;
 		uint64_t            ReadyInMs = 0;
 		uint64_t            RechargeMs = 0;
-		bool                IsUp      = false;
+		bool                IsUp = false;
 		bool                IsLastUser = false;
 		bool                Unconfirmed = false;
 	};
@@ -62,8 +62,8 @@ namespace Rezz
 	struct TurnView
 	{
 		std::vector<OrderRow> Rows;
-		int UpIndex        = -1;
-		int BackupIndex    = -1;
+		int UpIndex = -1;
+		int BackupIndex = -1;
 		int NextReadyIndex = -1;
 	};
 
@@ -73,15 +73,16 @@ namespace Rezz
 		static constexpr uint64_t kStaleDownedMs = 120 * 1000;
 		static constexpr uint64_t kRecastSlackMs = 5 * 1000;
 		static constexpr uint64_t kConfirmAfterMs = 120 * 1000;
+		static constexpr uint64_t kAlreadyCountedMs = 20 * 1000;
 
 		void SetOrder(std::vector<std::string> aAccounts);
 		bool RemoveFromOrder(const std::string& aAccount);
 		void InsertIntoOrder(size_t aIndex, const std::string& aAccount);
-		void ResetRotation() { m_LastOrderedUser.clear(); m_PreviousOrderedUser.clear(); m_LastOrderedUseMs = 0; }
+		void ResetRotation() { m_LastOrderedUser.clear(); }
 		const std::vector<std::string>& Order() const { return m_Order; }
 
 		void OnCastStart(uint64_t aTimeMs, const std::string& aAccount, uint32_t aSkillId);
-		void OnCastStop(uint64_t aTimeMs, const std::string& aAccount, uint32_t aSkillId, uint8_t aStopReason, int32_t aBaseMs);
+		void OnCastStop(uint64_t aTimeMs, const std::string& aAccount, uint32_t aSkillId, uint8_t aStopReason, int32_t aBaseMs, int32_t aScaledMs = 0, uint8_t aActivation = 0);
 		void OnOwnedEffect(uint64_t aTimeMs, const std::string& aOwnerAccount, uint32_t aSkillId);
 		void OnLifeState(uint64_t aTimeMs, const std::string& aAccount, LifeState aState);
 		void OnActivity(uint64_t aTimeMs, const std::string& aAccount);
@@ -89,8 +90,8 @@ namespace Rezz
 		void ForgetSkills(const std::string& aAccount);
 		void MarkSeenSince(uint64_t aTimeMs, const std::string& aAccount);
 		bool MarkUsed(uint64_t aTimeMs, const std::string& aAccount, ReviveGroup aGroup);
-		void MarkSkillReady(uint64_t aTimeMs, const std::string& aAccount, ReviveGroup aGroup);
-		void UndoRecentSignetUse(uint64_t aTimeMs, const std::string& aAccount, uint64_t aMaxAgeMs);
+		void MarkSkillReady(uint64_t aTimeMs, const std::string& aAccount, ReviveGroup aGroup, bool aForce = false);
+		bool IsRecentlyUsed(uint64_t aTimeMs, const std::string& aAccount, ReviveGroup aGroup) const;
 
 		const PlayerStatus* FindPlayer(const std::string& aAccount) const;
 		TurnView GetTurn(uint64_t aNowMs) const;
@@ -124,8 +125,6 @@ namespace Rezz
 		std::vector<std::string>                      m_Order;
 		std::unordered_map<std::string, PlayerStatus> m_Players;
 		std::string                                   m_LastOrderedUser;
-		std::string                                   m_PreviousOrderedUser;
-		uint64_t                                      m_LastOrderedUseMs = 0;
 		std::deque<RecentRevive>                      m_RecentRevives;
 		std::deque<RecentUp>                          m_RecentUps;
 		std::vector<Attribution>                      m_Attributions;

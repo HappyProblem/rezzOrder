@@ -76,5 +76,5 @@ ReviveGroup DefaultGroupForProfession(uint32_t aProfession);
 ReviveGroup FindReviveGroupByName(const char* aName);
 uint8_t GroupTargets(ReviveGroup aGroup);
 const ReviveGroupInfo& GetGroupInfo(ReviveGroup aGroup);
-bool CountsAsUsed(const ReviveSkill& aSkill, uint8_t aStopReason, int32_t aBaseMs);
+bool CountsAsUsed(const ReviveSkill& aSkill, uint8_t aStopReason, int32_t aBaseMs, int32_t aScaledMs = 0, uint8_t aActivation = 0);
 bool IsReviveRelatedName(const char* aName);

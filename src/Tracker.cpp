@@ -8,7 +8,7 @@ namespace Rezz
 	namespace
 	{
 		constexpr uint64_t kRecentWindowMs = 10 * 1000;
-		constexpr uint64_t kStuckCastMs    = 10 * 1000;
+		constexpr uint64_t kStuckCastMs = 10 * 1000;
 
 		struct Window { int64_t From; int64_t Expected; int64_t To; };
 
@@ -16,23 +16,18 @@ namespace Rezz
 		{
 			switch (aSkillId)
 			{
-				case 10244: return { -150, 0, 450 };
-				case 14419: return { -450, -70, 300 };
-				case 12601:
-				case 69336: return { -450, -115, 150 };
-				default:    return { -600, 0, 600 };
+			case 10244: return { -150, 0, 450 };
+			case 14419: return { -450, -70, 300 };
+			case 12601:
+			case 69336: return { -450, -115, 150 };
+			default:    return { -600, 0, 600 };
 			}
 		}
 	}
 
 	void Tracker::SetOrder(std::vector<std::string> aAccounts)
 	{
-		if (aAccounts != m_Order)
-		{
-			m_LastOrderedUser.clear();
-			m_PreviousOrderedUser.clear();
-			m_LastOrderedUseMs = 0;
-		}
+		if (aAccounts != m_Order) { m_LastOrderedUser.clear(); }
 		m_Order = std::move(aAccounts);
 	}
 
@@ -79,6 +74,21 @@ namespace Rezz
 		return it == m_Players.end() ? nullptr : &it->second;
 	}
 
+	bool Tracker::IsRecentlyUsed(uint64_t aTimeMs, const std::string& aAccount, ReviveGroup aGroup) const
+	{
+		const PlayerStatus* player = FindPlayer(aAccount);
+		if (player == nullptr) { return false; }
+		for (const SkillStatus& skill : player->Skills)
+		{
+			if (skill.Group == aGroup && skill.State == SkillState::Cooldown && skill.LastUsedMs != 0 &&
+				aTimeMs + 2000 >= skill.LastUsedMs && aTimeMs < skill.LastUsedMs + kAlreadyCountedMs)
+			{
+				return true;
+			}
+		}
+		return false;
+	}
+
 	void Tracker::OnCastStart(uint64_t aTimeMs, const std::string& aAccount, uint32_t aSkillId)
 	{
 		const ReviveSkill* info = FindReviveSkill(aSkillId);
@@ -87,6 +97,11 @@ namespace Rezz
 		PlayerStatus& player = GetPlayer(aAccount);
 		if (player.Life != LifeState::Alive) { player.Life = LifeState::Alive; player.LifeSinceMs = aTimeMs; }
 		SkillStatus& skill = GetSkill(player, info->Group);
+		// Guard against out-of-order batch events where ANIMATIONSTART arrives right after ANIMATIONSTOP/MarkUsed.
+		if (skill.State == SkillState::Cooldown && skill.LastUsedMs != 0 && aTimeMs <= skill.LastUsedMs + 2500)
+		{
+			return;
+		}
 		if (skill.State == SkillState::Cooldown && aTimeMs + kRecastSlackMs < skill.ReadyAtMs)
 		{
 			skill.EarlyRecasts++;
@@ -96,10 +111,14 @@ namespace Rezz
 		skill.Confirmed = true;
 	}
 
-	void Tracker::OnCastStop(uint64_t aTimeMs, const std::string& aAccount, uint32_t aSkillId, uint8_t aStopReason, int32_t aBaseMs)
+	void Tracker::OnCastStop(uint64_t aTimeMs, const std::string& aAccount, uint32_t aSkillId, uint8_t aStopReason, int32_t aBaseMs, int32_t aScaledMs, uint8_t aActivation)
 	{
 		const ReviveSkill* info = FindReviveSkill(aSkillId);
 		if (info == nullptr || !info->IsPlayerCast || aAccount.empty()) { return; }
+
+		// If a secondary trigger (e.g. 69381 summon buff or signet passive strip) already counted this cast
+		// a few milliseconds ago, do not double-count or overwrite the cooldown.
+		if (IsRecentlyUsed(aTimeMs, aAccount, info->Group)) { return; }
 
 		bool wasUp = false;
 		if (std::find(m_Order.begin(), m_Order.end(), aAccount) != m_Order.end())
@@ -109,15 +128,10 @@ namespace Rezz
 		}
 
 		SkillStatus& skill = GetSkill(GetPlayer(aAccount), info->Group);
-		if (!CountsAsUsed(*info, aStopReason, aBaseMs))
+		if (!CountsAsUsed(*info, aStopReason, aBaseMs, aScaledMs, aActivation))
 		{
 			skill.Cancels++;
 			skill.State = skill.ReadyAtMs > aTimeMs ? SkillState::Cooldown : SkillState::Ready;
-			return;
-		}
-
-		if (skill.State == SkillState::Cooldown && skill.LastUsedMs != 0 && aTimeMs >= skill.LastUsedMs && aTimeMs < skill.LastUsedMs + 5000)
-		{
 			return;
 		}
 
@@ -128,12 +142,7 @@ namespace Rezz
 		skill.State = SkillState::Cooldown;
 		skill.LastRevived = 0;
 
-		if (wasUp)
-		{
-			m_PreviousOrderedUser = m_LastOrderedUser;
-			m_LastOrderedUseMs = aTimeMs;
-			m_LastOrderedUser = aAccount;
-		}
+		if (wasUp) { m_LastOrderedUser = aAccount; }
 
 		if (info->Group != ReviveGroup::SpiritOfNature) { AddRevive(aTimeMs, aAccount, *info); }
 	}
@@ -141,8 +150,8 @@ namespace Rezz
 	bool Tracker::MarkUsed(uint64_t aTimeMs, const std::string& aAccount, ReviveGroup aGroup)
 	{
 		if (aAccount.empty() || aGroup == ReviveGroup::Count) { return false; }
-		// 20 s deduplication window covers 15 s banner/spirit pulsing effects while still allowing tests to pass.
-		constexpr uint64_t kAlreadyCountedMs = 20 * 1000;
+		if (IsRecentlyUsed(aTimeMs, aAccount, aGroup)) { return false; }
+
 		PlayerStatus& player = GetPlayer(aAccount);
 		if (player.Life != LifeState::Alive)
 		{
@@ -150,10 +159,6 @@ namespace Rezz
 			player.LifeSinceMs = aTimeMs;
 		}
 		SkillStatus& skill = GetSkill(player, aGroup);
-		if (skill.LastUsedMs != 0 && aTimeMs >= skill.LastUsedMs && aTimeMs < skill.LastUsedMs + kAlreadyCountedMs)
-		{
-			return false;
-		}
 
 		bool wasUp = false;
 		if (std::find(m_Order.begin(), m_Order.end(), aAccount) != m_Order.end())
@@ -168,41 +173,16 @@ namespace Rezz
 		skill.ReadyAtMs = aTimeMs + GetGroupInfo(aGroup).WvwRechargeS * 1000ull;
 		skill.State = SkillState::Cooldown;
 		skill.LastRevived = 0;
-		if (wasUp)
-		{
-			m_PreviousOrderedUser = m_LastOrderedUser;
-			m_LastOrderedUseMs = aTimeMs;
-			m_LastOrderedUser = aAccount;
-		}
-		if (const ReviveSkill* primary = PrimarySkillForGroup(aGroup))
-		{
-			AddRevive(aTimeMs, aAccount, *primary);
-		}
-		return true;
-	}
+		if (wasUp) { m_LastOrderedUser = aAccount; }
 
-	void Tracker::UndoRecentSignetUse(uint64_t aTimeMs, const std::string& aAccount, uint64_t aMaxAgeMs)
-	{
-		auto it = m_Players.find(aAccount);
-		if (it == m_Players.end()) { return; }
-		for (SkillStatus& skill : it->second.Skills)
+		if (aGroup != ReviveGroup::SpiritOfNature)
 		{
-			if ((skill.Group == ReviveGroup::SignetOfMercy || skill.Group == ReviveGroup::SignetOfUndeath) &&
-				skill.State == SkillState::Cooldown && skill.LastUsedMs != 0 &&
-				aTimeMs >= skill.LastUsedMs && aTimeMs <= skill.LastUsedMs + aMaxAgeMs &&
-				skill.LastRevived == 0)
+			if (const ReviveSkill* primary = PrimarySkillForGroup(aGroup))
 			{
-				if (skill.Uses > 0) { skill.Uses--; }
-				skill.LastUsedMs = 0;
-				skill.ReadyAtMs = aTimeMs;
-				skill.State = SkillState::Ready;
-				if (m_LastOrderedUser == aAccount && m_LastOrderedUseMs != 0 && aTimeMs <= m_LastOrderedUseMs + aMaxAgeMs)
-				{
-					m_LastOrderedUser = m_PreviousOrderedUser;
-					m_LastOrderedUseMs = 0;
-				}
+				AddRevive(aTimeMs, aAccount, *primary);
 			}
 		}
+		return true;
 	}
 
 	void Tracker::OnOwnedEffect(uint64_t aTimeMs, const std::string& aOwnerAccount, uint32_t aSkillId)
@@ -219,11 +199,6 @@ namespace Rezz
 		bool revived = player.Life == LifeState::Downed && aState == LifeState::Alive;
 		player.Life = aState;
 		player.LifeSinceMs = aTimeMs;
-		if (aState != LifeState::Alive)
-		{
-			UndoRecentSignetUse(aTimeMs, aAccount, 350);
-			return;
-		}
 		if (!revived) { return; }
 
 		Prune(aTimeMs);
@@ -262,11 +237,7 @@ namespace Rezz
 		PlayerStatus& player = GetPlayer(aAccount);
 		if (player.Away == aAway) { return; }
 		player.Away = aAway;
-		if (aAway)
-		{
-			UndoRecentSignetUse(aTimeMs, aAccount, 500);
-		}
-		else
+		if (!aAway)
 		{
 			player.Life = LifeState::Alive;
 			player.LifeSinceMs = aTimeMs;
@@ -281,25 +252,20 @@ namespace Rezz
 		for (SkillStatus& skill : player.Skills) { skill.Confirmed = false; }
 	}
 
-	void Tracker::MarkSkillReady(uint64_t aTimeMs, const std::string& aAccount, ReviveGroup aGroup)
+	void Tracker::MarkSkillReady(uint64_t aTimeMs, const std::string& aAccount, ReviveGroup aGroup, bool aForce)
 	{
 		if (aAccount.empty() || aGroup == ReviveGroup::Count) { return; }
 		SkillStatus& skill = GetSkill(GetPlayer(aAccount), aGroup);
-		// If a signet passive returns in under 45 s, it was stripped by mounting/unmounting rather than cast.
-		constexpr uint64_t kMinRealCooldownMs = 45 * 1000;
-		if (skill.State == SkillState::Cooldown && skill.LastUsedMs != 0 && aTimeMs >= skill.LastUsedMs &&
-			aTimeMs - skill.LastUsedMs < kMinRealCooldownMs && skill.LastRevived == 0)
-		{
-			if (skill.Uses > 0) { skill.Uses--; }
-			skill.LastUsedMs = 0;
-			if (m_LastOrderedUser == aAccount && m_LastOrderedUseMs != 0 && aTimeMs < m_LastOrderedUseMs + kMinRealCooldownMs)
-			{
-				m_LastOrderedUser = m_PreviousOrderedUser;
-				m_LastOrderedUseMs = 0;
-			}
-		}
 		skill.Confirmed = true;
 		if (skill.State == SkillState::Casting) { return; }
+		// Do not let passive buff events (e.g. CBTS_BUFFINITIAL or Necromancer Signets of Suffering)
+		// wipe out an active cooldown during the first 45 seconds after a cast.
+		constexpr uint64_t kProtectedCooldownMs = 45 * 1000;
+		if (!aForce && skill.State == SkillState::Cooldown && skill.LastUsedMs != 0 &&
+			aTimeMs < skill.LastUsedMs + kProtectedCooldownMs && aTimeMs < skill.ReadyAtMs)
+		{
+			return;
+		}
 		skill.State = SkillState::Ready;
 		skill.ReadyAtMs = aTimeMs;
 	}

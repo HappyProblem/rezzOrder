@@ -34,7 +34,6 @@ namespace Live
 
 			return sc == ArcDps::CBTS_COMBAT ||
 				sc == CBTS_BUFFACTIVE ||
-				sc == ArcDps::CBTS_BUFFCHANGE ||
 				sc == ArcDps::CBTS_ANIMATIONSTART ||
 				sc == ArcDps::CBTS_ANIMATIONSTOP ||
 				sc == ArcDps::CBTS_CHANGEDOWN ||
@@ -56,12 +55,9 @@ namespace Live
 		s_Session.OnCombat(*aData, now, false);
 	}
 
-	void OnCombatLocal(const ArcDps::EvCombatData* aData)
+	void OnCombatLocal(const ArcDps::EvCombatData*)
 	{
-		if (!IsRelevantCombatEvent(aData)) { return; }
-		uint32_t now = timeGetTime();
-		std::scoped_lock lock(s_Mutex);
-		s_Session.OnCombat(*aData, now, true);
+		// Keep all session tracking on the unified squad channel timeline.
 	}
 
 	void OnAgentUpdate(const ArcDps::EvAgentUpdate* aUpdate)
