@@ -6,12 +6,53 @@
 
 bool CountsAsUsed(const ReviveSkill& aSkill, uint8_t aStopReason, int32_t aBaseMs, int32_t aScaledMs, uint8_t aActivation)
 {
-	if (aStopReason == ArcDps::ANIMSTOP_RETURN_CONTROL || aActivation == ArcDps::ACTV_RESET)
+	// Natural full-cast completion states in ArcDPS:
+	// 5 = ENDED, 15 = MOTIONSKILL_VIA_RESET, 19 = GADGET_VIA_RESET, 22 = RETURN_CONTROL, 23 = READY
+	if (aStopReason == ArcDps::ANIMSTOP_RETURN_CONTROL ||
+		aStopReason == 5 ||
+		aStopReason == 15 ||
+		aStopReason == 19 ||
+		aStopReason == 23 ||
+		aActivation == ArcDps::ACTV_RESET)
 	{
 		return true;
 	}
-	int32_t effectiveMs = aBaseMs > 0 ? aBaseMs : aScaledMs;
-	return effectiveMs >= aSkill.CastMs;
+
+	// Hard interrupts / CC / going down or dying mid-cast: only count if the full base cast time already elapsed.
+	if (aStopReason == ArcDps::ANIMSTOP_INTERRUPT ||
+		aStopReason == 9 ||  // DEATH
+		aStopReason == 10 || // DOWNED
+		aStopReason == 11)   // CROWDCONTROL
+	{
+		return aBaseMs >= aSkill.CastMs;
+	}
+
+	// ACTV_MINIMUM (3) means the cast passed the skill's trigger point and fired before the aftercast was cut short.
+	if (aActivation == ArcDps::ACTV_MINIMUM)
+	{
+		return true;
+	}
+
+	// If unscaled base duration (ev.BuffDmg) is reported, allow a 25% margin for cancelling the post-cast aftercast.
+	if (aBaseMs > 0)
+	{
+		return aBaseMs >= (static_cast<int32_t>(aSkill.CastMs) * 75) / 100;
+	}
+
+	// When aBaseMs == 0 (ACTV_NODATA), only real-time duration (aScaledMs / ev.Value) is available.
+	// With Quickness in WvW (33.3% faster), a full cast takes 66.7% of CastMs (~833 ms for Illusion of Life),
+	// and cutting off the aftercast by moving or queueing the next skill happens around ~58-65% of CastMs.
+	if (aScaledMs > 0)
+	{
+		// Explicit manual cancel (6 = CANCEL, 17 = STOW) requires full Quickness duration.
+		if (aStopReason == 6 || aStopReason == 17)
+		{
+			return aScaledMs >= (static_cast<int32_t>(aSkill.CastMs) * 66) / 100;
+		}
+		return aScaledMs >= (static_cast<int32_t>(aSkill.CastMs) * 58) / 100;
+	}
+
+	return false;
 }
 
 uint8_t GroupTargets(ReviveGroup aGroup)
