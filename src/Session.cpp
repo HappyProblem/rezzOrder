@@ -91,6 +91,12 @@ namespace Rezz
 		return member;
 	}
 
+	const RosterMember* Session::FindMember(const std::string& aAccount) const
+	{
+		auto it = m_Roster.find(aAccount);
+		return it == m_Roster.end() ? nullptr : &it->second;
+	}
+
 	bool Session::InOrder(const std::string& aAccount) const
 	{
 		const std::vector<std::string>& order = m_Tracker.Order();
@@ -185,6 +191,62 @@ namespace Rezz
 		return {};
 	}
 
+	std::string Session::ResolveAccountWithFallback(const ArcDps::Agent* aAgent, uint64_t aId, uint16_t aInstId, bool aAllowNameScan)
+	{
+		if (aAgent != nullptr && aAgent->IsSelf != 0 && !m_SelfAccount.empty())
+		{
+			return m_SelfAccount;
+		}
+		std::string resolved = ResolveAccount(aId, aInstId);
+		if (!resolved.empty() || !aAllowNameScan) { return resolved; }
+
+		// Only scan squad character names for player agents (professions 1-9) on revive-relevant events.
+		if (aAgent != nullptr && aAgent->Profession >= 1 && aAgent->Profession <= 9 &&
+			aAgent->Name != nullptr && aAgent->Name[0] != '\0')
+		{
+			std::string charName = aAgent->Name;
+			if (IsUsableCharacterName(charName))
+			{
+				std::string match;
+				for (const auto& [acc, member] : m_Roster)
+				{
+					if (member.Character == charName)
+					{
+						if (!match.empty()) { match.clear(); break; }
+						match = acc;
+					}
+				}
+				if (!match.empty())
+				{
+					if (aId != 0)
+					{
+						AgentRef& ref = m_Agents[aId];
+						ref.Account = match;
+						if (aInstId != 0 && aInstId != 0xFFFF) { ref.InstanceId = aInstId; }
+					}
+					return match;
+				}
+			}
+		}
+		return {};
+	}
+
+	ReviveGroup Session::CachedReviveGroupByName(uint32_t aSkillId, const char* aSkillName)
+	{
+		if (aSkillId != 0)
+		{
+			auto it = m_SkillNameCache.find(aSkillId);
+			if (it != m_SkillNameCache.end()) { return it->second; }
+		}
+		if (aSkillName == nullptr || aSkillName[0] == '\0') { return ReviveGroup::Count; }
+		ReviveGroup group = FindReviveGroupByName(aSkillName);
+		if (aSkillId != 0 && m_SkillNameCache.size() < 4096)
+		{
+			m_SkillNameCache[aSkillId] = group;
+		}
+		return group;
+	}
+
 	void Session::UpdateSelfAgent(const ArcDps::Agent* aAgent, uint16_t aInstId)
 	{
 		if (aAgent == nullptr || aAgent->IsSelf == 0 || aAgent->Id == 0 || m_SelfAccount.empty()) { return; }
@@ -202,7 +264,7 @@ namespace Rezz
 			return aEventTime;
 		}
 		// ArcDPS timestamps events as (timeGetTime() - arc_startup_timeGetTime).
-		// Refine m_ClockOffsetMs strictly to the minimum observed offset so a delayed loading-screen or lag event cannot skew it.
+		// Strictly refine m_ClockOffsetMs to the minimum observed offset so loading hitches or lag spikes never skew it upward.
 		if (aNowMs > aEventTime + kSquadFeedDelayMs)
 		{
 			uint64_t candidate = aNowMs - aEventTime - kSquadFeedDelayMs;
@@ -213,9 +275,7 @@ namespace Rezz
 			}
 		}
 		uint64_t mapped = aEventTime + m_ClockOffsetMs;
-		if (mapped > aNowMs) { return aNowMs; }
-		if (aNowMs > kSquadFeedDelayMs && mapped + 8000 < aNowMs) { return aNowMs - kSquadFeedDelayMs; }
-		return mapped;
+		return mapped > aNowMs ? aNowMs : mapped;
 	}
 
 	void Session::RecordBackupSkillUse(uint64_t aTimeMs, const std::string& aAccount, ReviveGroup aGroup)
@@ -242,7 +302,10 @@ namespace Rezz
 		}
 		if (group == ReviveGroup::Count)
 		{
-			group = DefaultGroupForProfession(GetMember(target).Profession);
+			if (const RosterMember* member = FindMember(target))
+			{
+				group = DefaultGroupForProfession(member->Profession);
+			}
 		}
 		RecordBackupSkillUse(aNowMs, target, group);
 	}
@@ -258,8 +321,11 @@ namespace Rezz
 				m_Tracker.MarkSkillReady(aNowMs, target, skill.Group, true);
 			}
 		}
-		ReviveGroup def = DefaultGroupForProfession(GetMember(target).Profession);
-		if (def != ReviveGroup::Count) { m_Tracker.MarkSkillReady(aNowMs, target, def, true); }
+		if (const RosterMember* member = FindMember(target))
+		{
+			ReviveGroup def = DefaultGroupForProfession(member->Profession);
+			if (def != ReviveGroup::Count) { m_Tracker.MarkSkillReady(aNowMs, target, def, true); }
+		}
 	}
 
 	void Session::OnCombat(const ArcDps::EvCombatData& aData, uint64_t aNowMs, bool aIsLocal)
@@ -274,34 +340,6 @@ namespace Rezz
 		UpdateSelfAgent(aData.Dst, ev.DstInstId);
 		uint64_t evTime = NormalizeEventTime(ev.Time, aNowMs);
 
-		auto resolveWithSelf = [&](const ArcDps::Agent* aAgent, uint64_t aId, uint16_t aInstId) -> std::string
-			{
-				if (aAgent != nullptr && aAgent->IsSelf != 0 && !m_SelfAccount.empty())
-				{
-					return m_SelfAccount;
-				}
-				std::string resolved = ResolveAccount(aId, aInstId);
-				if (!resolved.empty()) { return resolved; }
-				if (aAgent != nullptr && aAgent->Name != nullptr && aAgent->Name[0] != '\0')
-				{
-					std::string charName = aAgent->Name;
-					if (IsUsableCharacterName(charName))
-					{
-						std::string match;
-						for (const auto& [acc, member] : m_Roster)
-						{
-							if (member.Character == charName)
-							{
-								if (!match.empty()) { match.clear(); break; }
-								match = acc;
-							}
-						}
-						if (!match.empty()) { return match; }
-					}
-				}
-				return {};
-			};
-
 		switch (sc)
 		{
 		case ArcDps::CBTS_SQCOMBATSTART: m_CombatSinceMs = aNowMs; m_OutOfCombatSinceMs = 0; return;
@@ -309,43 +347,17 @@ namespace Rezz
 		case ArcDps::CBTS_ENTERCOMBAT:
 		{
 			if (m_CombatSinceMs == 0) { m_CombatSinceMs = aNowMs; m_OutOfCombatSinceMs = 0; }
-			std::string account = resolveWithSelf(aData.Src, srcId, ev.SrcInstId);
+			std::string account = ResolveAccountWithFallback(aData.Src, srcId, ev.SrcInstId, false);
 			if (!account.empty()) { GetMember(account).LastEventMs = aNowMs; }
 			return;
 		}
 		case ArcDps::CBTS_ANIMATIONSTART:
 		{
-			std::string account = resolveWithSelf(aData.Src, srcId, ev.SrcInstId);
+			const ReviveSkill* skill = FindReviveSkill(ev.SkillId);
+			std::string account = ResolveAccountWithFallback(aData.Src, srcId, ev.SrcInstId, skill != nullptr);
 			if (account.empty()) { return; }
 			GetMember(account).LastEventMs = aNowMs;
 			m_Tracker.OnActivity(evTime, account);
-			const ReviveSkill* skill = FindReviveSkill(ev.SkillId);
-
-			// If the player was already casting a revive skill for at least 58% of its duration (Quickness threshold)
-			// and started a different skill without ArcDPS delivering CBTS_ANIMATIONSTOP, complete the revive cast.
-			if (const PlayerStatus* status = m_Tracker.FindPlayer(account))
-			{
-				if (status->Life == LifeState::Alive)
-				{
-					for (const SkillStatus& s : status->Skills)
-					{
-						if (s.State == SkillState::Casting && s.CastStartMs != 0 && (!skill || skill->Group != s.Group))
-						{
-							const ReviveSkill* primary = PrimarySkillForGroup(s.Group);
-							uint64_t minMs = primary ? (static_cast<uint64_t>(primary->CastMs) * 58) / 100 : 725;
-							if (evTime >= s.CastStartMs + minMs)
-							{
-								RecordBackupSkillUse(evTime, account, s.Group);
-								if (!m_IllusionApplySeen && s.Group == ReviveGroup::IllusionOfLife)
-								{
-									MatchIllusion(evTime, account, true);
-								}
-							}
-						}
-					}
-				}
-			}
-
 			if (skill && skill->IsPlayerCast)
 			{
 				m_Tracker.OnCastStart(evTime, account, ev.SkillId);
@@ -368,7 +380,7 @@ namespace Rezz
 				TakeAttributions();
 				return;
 			}
-			std::string account = resolveWithSelf(aData.Src, srcId, ev.SrcInstId);
+			std::string account = ResolveAccountWithFallback(aData.Src, srcId, ev.SrcInstId, true);
 			if (account.empty()) { return; }
 
 			// If a secondary backup trigger already counted this cast a moment ago, skip double-counting.
@@ -411,7 +423,7 @@ namespace Rezz
 		case ArcDps::CBTS_CHANGEUP:
 		case ArcDps::CBTS_CHANGEDEAD:
 		{
-			std::string account = resolveWithSelf(aData.Src, srcId, ev.SrcInstId);
+			std::string account = ResolveAccountWithFallback(aData.Src, srcId, ev.SrcInstId, true);
 			if (account.empty()) { return; }
 			GetMember(account).LastEventMs = aNowMs;
 			LifeState state = sc == ArcDps::CBTS_CHANGEDOWN ? LifeState::Downed
@@ -430,8 +442,8 @@ namespace Rezz
 		case ArcDps::CBTS_BUFFAPPLY:
 		case ArcDps::CBTS_BUFFINITIAL:
 		{
-			std::string srcAccount = resolveWithSelf(aData.Src, srcId, ev.SrcInstId);
-			std::string dstAccount = resolveWithSelf(aData.Dst, dstId, ev.DstInstId);
+			std::string srcAccount = ResolveAccountWithFallback(aData.Src, srcId, ev.SrcInstId, false);
+			std::string dstAccount = ResolveAccountWithFallback(aData.Dst, dstId, ev.DstInstId, false);
 			if (!srcAccount.empty())
 			{
 				GetMember(srcAccount).LastEventMs = aNowMs;
@@ -439,10 +451,11 @@ namespace Rezz
 			}
 			if (!dstAccount.empty()) { GetMember(dstAccount).LastEventMs = aNowMs; }
 
-			// Signet passive presence (9162 / 10610) MUST be handled before name matching because passive buffs
-			// share the same skill names ("Signet of Mercy" / "Signet of Undeath") as the active casts.
+			// Signet passive presence (9162 / 10610) MUST be handled first so name matching never treats
+			// a passive signet buff as an active cast.
 			if (ev.SkillId == kSignetOfMercyPassive || ev.SkillId == kSignetOfUndeathPassive)
 			{
+				if (dstAccount.empty()) { dstAccount = ResolveAccountWithFallback(aData.Dst, dstId, ev.DstInstId, true); }
 				if (!dstAccount.empty())
 				{
 					ReviveGroup group = ev.SkillId == kSignetOfMercyPassive ? ReviveGroup::SignetOfMercy : ReviveGroup::SignetOfUndeath;
@@ -452,41 +465,43 @@ namespace Rezz
 				return;
 			}
 
-			// Backup 0: Illusion of Life effect (10346) on revived ally (handled before name matching so it never
-			// accidentally credits dstAccount or skips the Illusion of Life countdown tracker).
-			if (ev.SkillId == kIllusionOfLifeEffect && sc != ArcDps::CBTS_BUFFINITIAL)
+			// Backup 0: Illusion of Life effect (10346) on revived ally (must run before name matching).
+			if (ev.SkillId == kIllusionOfLifeEffect)
 			{
+				if (sc == ArcDps::CBTS_BUFFINITIAL) { return; }
+				if (srcAccount.empty()) { srcAccount = ResolveAccountWithFallback(aData.Src, srcId, ev.SrcInstId, true); }
+				if (dstAccount.empty()) { dstAccount = ResolveAccountWithFallback(aData.Dst, dstId, ev.DstInstId, true); }
+
 				std::string caster = srcAccount;
 				if ((caster.empty() || caster == dstAccount) && ev.SrcMasterInstId != 0)
 				{
 					caster = AccountByInstance(ev.SrcMasterInstId);
 				}
-				if (caster.empty() || (caster == dstAccount && GetMember(caster).Profession != 7))
+				const RosterMember* casterMember = caster.empty() ? nullptr : FindMember(caster);
+				if (caster.empty() || (caster == dstAccount && (casterMember == nullptr || casterMember->Profession != 7)))
 				{
+					// Only infer caster if there is uniquely one squad Mesmer actively casting Illusion of Life.
 					caster.clear();
-					// Find any squad Mesmer currently casting Illusion of Life, or fall back to local Mesmer.
+					std::string uniqueCastingMesmer;
+					bool ambiguous = false;
 					for (const auto& [acc, member] : m_Roster)
 					{
 						if (member.Profession != 7 || !member.OnMap) { continue; }
-						if (const PlayerStatus* st = m_Tracker.FindPlayer(acc))
+						const PlayerStatus* st = m_Tracker.FindPlayer(acc);
+						if (st == nullptr) { continue; }
+						for (const SkillStatus& sk : st->Skills)
 						{
-							for (const SkillStatus& sk : st->Skills)
+							if (sk.Group == ReviveGroup::IllusionOfLife && sk.State == SkillState::Casting)
 							{
-								if (sk.Group == ReviveGroup::IllusionOfLife &&
-									(sk.State == SkillState::Casting || (sk.LastUsedMs != 0 && evTime <= sk.LastUsedMs + 3000)))
-								{
-									caster = acc;
-									break;
-								}
+								if (!uniqueCastingMesmer.empty()) { ambiguous = true; break; }
+								uniqueCastingMesmer = acc;
 							}
 						}
-						if (!caster.empty()) { break; }
+						if (ambiguous) { break; }
 					}
-					if (caster.empty() && !m_SelfAccount.empty() && GetMember(m_SelfAccount).Profession == 7)
-					{
-						caster = m_SelfAccount;
-					}
+					if (!ambiguous && !uniqueCastingMesmer.empty()) { caster = uniqueCastingMesmer; }
 				}
+
 				if (!dstAccount.empty())
 				{
 					m_IllusionApplySeen = true;
@@ -504,6 +519,8 @@ namespace Rezz
 			if (const ReviveSkill* skill = FindReviveSkill(ev.SkillId))
 			{
 				if (sc == ArcDps::CBTS_BUFFINITIAL) { return; }
+				if (srcAccount.empty()) { srcAccount = ResolveAccountWithFallback(aData.Src, srcId, ev.SrcInstId, true); }
+				if (dstAccount.empty()) { dstAccount = ResolveAccountWithFallback(aData.Dst, dstId, ev.DstInstId, true); }
 				if (skill->IsPlayerCast)
 				{
 					std::string caster = !srcAccount.empty() ? srcAccount : dstAccount;
@@ -525,7 +542,7 @@ namespace Rezz
 			}
 
 			// Backup 2: Spirit of Nature Renewal species ID (6649)
-			if (aData.Src && aData.Src->Profession == kSpiritOfNatureSpecies)
+			if (sc != ArcDps::CBTS_BUFFINITIAL && aData.Src && aData.Src->Profession == kSpiritOfNatureSpecies)
 			{
 				std::string owner = AccountByInstance(ev.SrcMasterInstId);
 				if (owner.empty()) { owner = srcAccount; }
@@ -536,27 +553,31 @@ namespace Rezz
 				}
 			}
 
-			// Backup 3: Skill name or summoned minion name ("Spirit of Nature Renewal", "Battle Standard", etc.)
+			// Backup 3: Cached skill name or summoned NPC/minion name ("Spirit of Nature Renewal", "Battle Standard", etc.)
 			if (sc != ArcDps::CBTS_BUFFINITIAL)
 			{
-				ReviveGroup byName = FindReviveGroupByName(aData.SkillName);
-				if (byName == ReviveGroup::Count && aData.Src && aData.Src->Name)
+				ReviveGroup byName = CachedReviveGroupByName(ev.SkillId, aData.SkillName);
+				if (byName == ReviveGroup::Count && aData.Src && (aData.Src->Profession == 0 || aData.Src->Profession > 9) && aData.Src->Name)
 				{
 					byName = FindReviveGroupByName(aData.Src->Name);
 				}
-				if (byName == ReviveGroup::Count && aData.Dst && aData.Dst->Name)
+				if (byName == ReviveGroup::Count && aData.Dst && (aData.Dst->Profession == 0 || aData.Dst->Profession > 9) && aData.Dst->Name)
 				{
 					byName = FindReviveGroupByName(aData.Dst->Name);
 				}
 				if (byName != ReviveGroup::Count)
 				{
+					if (srcAccount.empty()) { srcAccount = ResolveAccountWithFallback(aData.Src, srcId, ev.SrcInstId, true); }
+					if (dstAccount.empty()) { dstAccount = ResolveAccountWithFallback(aData.Dst, dstId, ev.DstInstId, true); }
 					std::string caster = srcAccount;
 					if (caster.empty() && ev.SrcMasterInstId != 0) { caster = AccountByInstance(ev.SrcMasterInstId); }
 					if (caster.empty() && ev.DstMasterInstId != 0) { caster = AccountByInstance(ev.DstMasterInstId); }
-					if (caster.empty() && !dstAccount.empty() &&
-						DefaultGroupForProfession(GetMember(dstAccount).Profession) == byName)
+					if (caster.empty() && !dstAccount.empty())
 					{
-						caster = dstAccount;
+						if (const RosterMember* dstMember = FindMember(dstAccount))
+						{
+							if (DefaultGroupForProfession(dstMember->Profession) == byName) { caster = dstAccount; }
+						}
 					}
 					RecordBackupSkillUse(evTime, caster, byName);
 					return;
@@ -564,42 +585,53 @@ namespace Rezz
 			}
 
 			// Backup 4: Battle Standard simultaneous Might + Fury + Swiftness boon pulse
-			bool isBoonApply = sc == ArcDps::CBTS_BUFFAPPLY ||
-				(sc == ArcDps::CBTS_COMBAT && ev.Buff != 0 && ev.IsBuffRemove == 0 && ev.Value != 0);
-			if (isBoonApply)
+			if (ev.SkillId == kBoonFury || ev.SkillId == kBoonSwiftness || ev.SkillId == kBoonMight)
 			{
-				std::string owner = !srcAccount.empty() ? srcAccount : AccountByInstance(ev.SrcMasterInstId);
-				if (!owner.empty() && GetMember(owner).Profession == 2)
+				bool isBoonApply = sc == ArcDps::CBTS_BUFFAPPLY ||
+					(sc == ArcDps::CBTS_COMBAT && ev.Buff != 0 && ev.IsBuffRemove == 0 && ev.Value != 0);
+				if (isBoonApply)
 				{
 					bool bannerFury = ev.SkillId == kBoonFury && ev.Value >= 5500 && ev.Value <= 12500;
 					bool bannerSwift = ev.SkillId == kBoonSwiftness && ev.Value >= 11500 && ev.Value <= 24500;
 					bool bannerMight = ev.SkillId == kBoonMight && ev.Value >= 11500 && ev.Value <= 24500;
 					if (bannerFury || bannerSwift || bannerMight)
 					{
-						MinionBoonState& state = m_MinionBoons[srcId];
-						if (state.FirstMs == 0 || evTime > state.FirstMs + 50) { state = MinionBoonState{ evTime, 0 }; }
-						if (bannerMight) { state.Mask |= 1; }
-						if (bannerFury) { state.Mask |= 2; }
-						if (bannerSwift) { state.Mask |= 4; }
-						if ((state.Mask & 7) == 7)
+						std::string owner = !srcAccount.empty() ? srcAccount : AccountByInstance(ev.SrcMasterInstId);
+						const RosterMember* ownerMember = owner.empty() ? nullptr : FindMember(owner);
+						if (ownerMember != nullptr && ownerMember->Profession == 2)
 						{
-							RecordBackupSkillUse(evTime, owner, ReviveGroup::BattleStandard);
-							return;
+							MinionBoonState& state = m_MinionBoons[srcId];
+							if (state.FirstMs == 0 || evTime > state.FirstMs + 50) { state = MinionBoonState{ evTime, 0 }; }
+							if (bannerMight) { state.Mask |= 1; }
+							if (bannerFury) { state.Mask |= 2; }
+							if (bannerSwift) { state.Mask |= 4; }
+							if ((state.Mask & 7) == 7)
+							{
+								state.Mask = 0;
+								RecordBackupSkillUse(evTime, owner, ReviveGroup::BattleStandard);
+								return;
+							}
 						}
 					}
 				}
 			}
 
-			if (sc != ArcDps::CBTS_BUFFAPPLY) { return; }
-
 			// Backup 6: Resurrection effect (848) applied by a squad reviver to another ally
-			if (ev.SkillId == kResurrectionBuff && !srcAccount.empty() && srcAccount != dstAccount)
+			if (sc == ArcDps::CBTS_BUFFAPPLY && ev.SkillId == kResurrectionBuff)
 			{
-				ReviveGroup group = DefaultGroupForProfession(GetMember(srcAccount).Profession);
-				if (group != ReviveGroup::Count)
+				if (srcAccount.empty()) { srcAccount = ResolveAccountWithFallback(aData.Src, srcId, ev.SrcInstId, true); }
+				if (dstAccount.empty()) { dstAccount = ResolveAccountWithFallback(aData.Dst, dstId, ev.DstInstId, true); }
+				if (!srcAccount.empty() && srcAccount != dstAccount)
 				{
-					RecordBackupSkillUse(evTime, srcAccount, group);
-					return;
+					if (const RosterMember* srcMember = FindMember(srcAccount))
+					{
+						ReviveGroup group = DefaultGroupForProfession(srcMember->Profession);
+						if (group != ReviveGroup::Count)
+						{
+							RecordBackupSkillUse(evTime, srcAccount, group);
+							return;
+						}
+					}
 				}
 			}
 			return;
@@ -607,7 +639,7 @@ namespace Rezz
 		case ArcDps::CBTS_BUFFREMOVE_ALL:
 		case ArcDps::CBTS_BUFFREMOVE_SINGLE:
 		{
-			std::string srcAccount = resolveWithSelf(aData.Src, srcId, ev.SrcInstId);
+			std::string srcAccount = ResolveAccountWithFallback(aData.Src, srcId, ev.SrcInstId, true);
 			if (ev.SkillId == kIllusionOfLifeEffect)
 			{
 				if (!srcAccount.empty()) { m_Illusions.erase(srcAccount); }
@@ -617,8 +649,9 @@ namespace Rezz
 			if ((ev.SkillId == kSignetOfMercyPassive || ev.SkillId == kSignetOfUndeathPassive) &&
 				ev.IsBuffRemove != CBTB_MANUAL && m_CombatSinceMs != 0 && !srcAccount.empty())
 			{
+				const RosterMember* member = FindMember(srcAccount);
 				const PlayerStatus* status = m_Tracker.FindPlayer(srcAccount);
-				if (GetMember(srcAccount).OnMap && (status == nullptr || (status->Life == LifeState::Alive && !status->Away)))
+				if (member != nullptr && member->OnMap && (status == nullptr || (status->Life == LifeState::Alive && !status->Away)))
 				{
 					ReviveGroup group = ev.SkillId == kSignetOfMercyPassive ? ReviveGroup::SignetOfMercy : ReviveGroup::SignetOfUndeath;
 					RecordBackupSkillUse(evTime, srcAccount, group);
@@ -1111,8 +1144,16 @@ namespace Rezz
 		std::erase_if(m_MinionBoons, [aNowMs](const auto& aEntry) { return aEntry.second.FirstMs + 10000 < aNowMs; });
 		if (!m_Vacancies.empty()) { MatchSubstitutes(aNowMs); }
 
-		// If CBTS_ANIMATIONSTART was received for a revive skill and 2.5 seconds have passed while the caster
-		// remained Alive and on map without any CBTS_ANIMATIONSTOP cancel/interrupt arriving, complete the cast.
+		// Fallback for genuinely dropped CBTS_ANIMATIONSTOP packets:
+		// Wait for squad feed delay (2650 ms) + 2x base cast time (covers Slow/Chill) + 1500 ms jitter,
+		// so every real completion or cancel still resolves via CBTS_ANIMATIONSTOP first (and stays under Tracker::kStuckCastMs = 10s).
+		struct TimedOutCast
+		{
+			std::string Account;
+			ReviveGroup Group;
+			uint64_t    FinishMs;
+		};
+		std::vector<TimedOutCast> timedOut;
 		for (const auto& [account, member] : m_Roster)
 		{
 			if (!member.OnMap) { continue; }
@@ -1120,18 +1161,26 @@ namespace Rezz
 			if (status == nullptr || status->Life != LifeState::Alive || status->Away) { continue; }
 			for (const SkillStatus& skill : status->Skills)
 			{
-				if (skill.State == SkillState::Casting && skill.CastStartMs != 0 && aNowMs >= skill.CastStartMs + 2500)
+				if (skill.State == SkillState::Casting && skill.CastStartMs != 0)
 				{
 					const ReviveSkill* primary = PrimarySkillForGroup(skill.Group);
-					uint64_t finishMs = skill.CastStartMs + (primary ? primary->CastMs : 1250);
-					if (finishMs > aNowMs) { finishMs = aNowMs; }
-					RecordBackupSkillUse(finishMs, account, skill.Group);
-					if (!m_IllusionApplySeen && skill.Group == ReviveGroup::IllusionOfLife)
+					uint64_t castMs = primary ? primary->CastMs : 1250;
+					uint64_t thresholdMs = kSquadFeedDelayMs + castMs * 2 + 1500;
+					if (aNowMs >= skill.CastStartMs + thresholdMs)
 					{
-						MatchIllusion(finishMs, account, true);
+						uint64_t finishMs = skill.CastStartMs + castMs;
+						if (finishMs > aNowMs) { finishMs = aNowMs; }
+						timedOut.push_back(TimedOutCast{ account, skill.Group, finishMs });
 					}
-					break;
 				}
+			}
+		}
+		for (const TimedOutCast& cast : timedOut)
+		{
+			RecordBackupSkillUse(cast.FinishMs, cast.Account, cast.Group);
+			if (!m_IllusionApplySeen && cast.Group == ReviveGroup::IllusionOfLife)
+			{
+				MatchIllusion(cast.FinishMs, cast.Account, true);
 			}
 		}
 

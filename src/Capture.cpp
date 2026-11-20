@@ -17,26 +17,26 @@
 
 namespace Capture
 {
-	std::atomic<bool> LogAllEvents{false};
-	std::atomic<bool> LogKeys{false};
+	std::atomic<bool> LogAllEvents{ false };
+	std::atomic<bool> LogKeys{ false };
 
 	namespace
 	{
-		constexpr size_t   kFeedLimit      = 60;
-		constexpr size_t   kCommandLimit   = 20;
+		constexpr size_t   kFeedLimit = 60;
+		constexpr size_t   kCommandLimit = 20;
 		constexpr int64_t  kMaxSaneDelayMs = 10 * 60 * 1000;
 		constexpr uint32_t kPositionEveryMs = 1000;
-		constexpr uint32_t kSeenEveryMs     = 10 * 1000;
-		constexpr uint32_t kClockEveryMs    = 60 * 1000;
+		constexpr uint32_t kSeenEveryMs = 10 * 1000;
+		constexpr uint32_t kClockEveryMs = 60 * 1000;
 
 		constexpr uint8_t CBTS_SQCOMBATSTART = 9;
-		constexpr uint8_t CBTS_SQCOMBATEND   = 10;
-		constexpr uint8_t CBTS_BUFFINITIAL   = 18;
-		constexpr uint8_t CBTB_MANUAL        = 3;
+		constexpr uint8_t CBTS_SQCOMBATEND = 10;
+		constexpr uint8_t CBTS_BUFFINITIAL = 18;
+		constexpr uint8_t CBTB_MANUAL = 3;
 
 		// Conditions/boons that change cast speed (quickness, slow) or recharge speed (chilled, alacrity).
 		enum TrackedBuff { TB_QUICKNESS, TB_SLOW, TB_CHILLED, TB_ALACRITY, TB_COUNT };
-		constexpr uint32_t    kTrackedBuffIds[TB_COUNT]   = { 1187, 26766, 722, 30328 };
+		constexpr uint32_t    kTrackedBuffIds[TB_COUNT] = { 1187, 26766, 722, 30328 };
 		constexpr const char* kTrackedBuffNames[TB_COUNT] = { "quick", "slow", "chill", "alac" };
 
 		// Buffs recorded for everyone: revive effects, and signet passives whose return marks a recharged signet.
@@ -46,23 +46,18 @@ namespace Capture
 			5764,  // Renewal of Fire self-revive
 			5765,  // Renewal of Air
 			848,   // Resurrection (after getting up)
-			10346, // Illusion of Life on a revived ally: 15 s, then down again unless they rally. The apply was
-			       // already logged by name; this adds the removal, which is what tells a rally from a timeout.
+			10346, // Illusion of Life on a revived ally: 15 s, then down again unless they rally.
 		};
 
-		// Players are identified by account name. Character names are unreliable: in Edge of the Mists players
-		// from other worlds show as localized rank names ("Diamond Legend"), which repeat. The arcdps agent id
-		// is the key into this table, with the map instance id as fallback because player ids can change
-		// mid-map (arcdps' iid change isn't sent to the live feed).
 		struct AgentState
 		{
 			std::string Character;
 			std::string Account;
-			uint16_t    InstanceId     = 0;
-			bool        IsSelf         = false;
+			uint16_t    InstanceId = 0;
+			bool        IsSelf = false;
 			bool        IsReviveCaster = false;
 			uint32_t    EventsInWindow = 0;
-			uint64_t    LastEventMs    = 0;
+			uint64_t    LastEventMs = 0;
 			uint64_t    BuffExpiry[TB_COUNT] = {};
 		};
 
@@ -81,22 +76,20 @@ namespace Capture
 		std::string                        s_SelfCharacter;
 		uint32_t                           s_MarkCount = 0;
 
-		std::atomic<uint8_t>  s_MapType{0};
-		std::atomic<uint32_t> s_MapId{0};
-		std::atomic<uint64_t> s_ArcEvents{0};
-		std::atomic<uint64_t> s_UeEvents{0};
+		std::atomic<uint8_t>  s_MapType{ 0 };
+		std::atomic<uint32_t> s_MapId{ 0 };
+		std::atomic<uint64_t> s_ArcEvents{ 0 };
+		std::atomic<uint64_t> s_UeEvents{ 0 };
 
 		// Render thread only.
 		uint32_t s_LastPositionMs = 0;
-		uint32_t s_LastSeenMs     = 0;
-		uint32_t s_LastClockMs    = 0;
+		uint32_t s_LastSeenMs = 0;
+		uint32_t s_LastClockMs = 0;
 
 		const char* ChannelName(Channel aChannel) { return aChannel == CH_SQUAD ? "SQUAD" : "LOCAL"; }
 
 		bool IsWvwMap(uint8_t aMapType)
 		{
-			// MumbleLink map types 9-15: Eternal Battlegrounds, the three borderlands, Fortune's Vale,
-			// Obsidian Sanctum, Edge of the Mists. The lobby (18) is excluded.
 			return aMapType >= 9 && aMapType <= 15;
 		}
 
@@ -135,8 +128,6 @@ namespace Capture
 
 		std::string Str(const char* aText) { return aText ? aText : ""; }
 
-		// Squad player for an event's agent, or null. Falls back to the map instance id when the agent id is
-		// unknown (player id changed); the new id is then remembered as an alias. Caller holds s_Mutex.
 		AgentState* FindAgent(uint64_t aId, uint16_t aInstanceId)
 		{
 			if (aId == 0) { return nullptr; }
@@ -164,39 +155,36 @@ namespace Capture
 			return nullptr;
 		}
 
-		// Duration-stacking model of a tracked buff, in arcdps event time. Buffs are applied to dst and
-		// removed from src. Caller holds s_Mutex.
 		void UpdateTrackedBuff(const ArcDps::CombatEvent& aEv, AgentState* aSrc, AgentState* aDst, int aBuff)
 		{
 			switch (aEv.IsStatechange)
 			{
-				case ArcDps::CBTS_BUFFAPPLY:
-				case CBTS_BUFFINITIAL:
-				{
-					if (aDst == nullptr) { return; }
-					uint64_t& expiry = aDst->BuffExpiry[aBuff];
-					expiry = std::max(expiry, aEv.Time) + static_cast<uint64_t>(std::max(aEv.Value, 0));
-					return;
-				}
-				case ArcDps::CBTS_BUFFREMOVE_ALL:
-				{
-					if (aSrc) { aSrc->BuffExpiry[aBuff] = aEv.Time; }
-					return;
-				}
-				case ArcDps::CBTS_BUFFREMOVE_SINGLE:
-				{
-					if (aSrc == nullptr || aEv.IsBuffRemove == CBTB_MANUAL) { return; } // manual: synthesized alongside REMOVE_ALL
-					uint64_t& expiry = aSrc->BuffExpiry[aBuff];
-					uint64_t removed = static_cast<uint64_t>(std::max(aEv.Value, 0));
-					expiry = expiry > aEv.Time + removed ? expiry - removed : aEv.Time;
-					return;
-				}
-				default:
-					return;
+			case ArcDps::CBTS_BUFFAPPLY:
+			case CBTS_BUFFINITIAL:
+			{
+				if (aDst == nullptr) { return; }
+				uint64_t& expiry = aDst->BuffExpiry[aBuff];
+				expiry = std::max(expiry, aEv.Time) + static_cast<uint64_t>(std::max(aEv.Value, 0));
+				return;
+			}
+			case ArcDps::CBTS_BUFFREMOVE_ALL:
+			{
+				if (aSrc) { aSrc->BuffExpiry[aBuff] = aEv.Time; }
+				return;
+			}
+			case ArcDps::CBTS_BUFFREMOVE_SINGLE:
+			{
+				if (aSrc == nullptr || aEv.IsBuffRemove == CBTB_MANUAL) { return; }
+				uint64_t& expiry = aSrc->BuffExpiry[aBuff];
+				uint64_t removed = static_cast<uint64_t>(std::max(aEv.Value, 0));
+				expiry = expiry > aEv.Time + removed ? expiry - removed : aEv.Time;
+				return;
+			}
+			default:
+				return;
 			}
 		}
 
-		// "quick=1200 slow=0 chill=0 alac=5300": remaining ms of each tracked buff. Caller holds s_Mutex.
 		std::string BuffSnapshot(const AgentState* aAgent, uint64_t aTime)
 		{
 			if (aAgent == nullptr) { return ""; }
@@ -235,13 +223,13 @@ namespace Capture
 	{
 		switch (static_cast<UserRole>(aRole))
 		{
-			case UserRole::SquadLeader: return "SquadLeader";
-			case UserRole::Lieutenant:  return "Lieutenant";
-			case UserRole::Member:      return "Member";
-			case UserRole::Invited:     return "Invited";
-			case UserRole::Applied:     return "Applied";
-			case UserRole::None:        return "None";
-			default:                    return "Invalid";
+		case UserRole::SquadLeader: return "SquadLeader";
+		case UserRole::Lieutenant:  return "Lieutenant";
+		case UserRole::Member:      return "Member";
+		case UserRole::Invited:     return "Invited";
+		case UserRole::Applied:     return "Applied";
+		case UserRole::None:        return "None";
+		default:                    return "Invalid";
 		}
 	}
 
@@ -305,7 +293,7 @@ namespace Capture
 	void OnCombat(Channel aChannel, const ArcDps::EvCombatData* aData)
 	{
 		uint32_t arrive = timeGetTime();
-		if (aData == nullptr || aData->Ev == nullptr) { return; } // agent notifications come via OnAgentUpdate
+		if (aData == nullptr || aData->Ev == nullptr) { return; }
 		s_ArcEvents++;
 
 		const ArcDps::CombatEvent& ev = *aData->Ev;
@@ -319,7 +307,6 @@ namespace Capture
 		bool delayValid = ev.Time != 0 && delay >= 0 && delay < kMaxSaneDelayMs;
 		bool isSelf = src != nullptr && src->IsSelf != 0;
 
-		// Classify cheaply first; most events (damage, boons) are dropped without any string work.
 		bool isAnimation = sc == ArcDps::CBTS_ANIMATIONSTART || sc == ArcDps::CBTS_ANIMATIONSTOP;
 		bool isLifeState = sc == ArcDps::CBTS_CHANGEDOWN || sc == ArcDps::CBTS_CHANGEUP || sc == ArcDps::CBTS_CHANGEDEAD;
 		bool isBuffEvent = sc == ArcDps::CBTS_BUFFAPPLY || sc == ArcDps::CBTS_BUFFREMOVE_SINGLE ||
@@ -332,12 +319,11 @@ namespace Capture
 		bool reviveByName = revive == nullptr && !reviveBuff && trackedBuff < 0 &&
 			(isAnimation || sc == ArcDps::CBTS_BUFFAPPLY) && IsReviveRelatedName(aData->SkillName);
 
-		// Revive skills use the Phase 0 rule; arcdps' own flag misreads several of them.
 		const char* verdict = "";
 		if (sc == ArcDps::CBTS_ANIMATIONSTOP)
 		{
 			verdict = revive
-				? (CountsAsUsed(*revive, ev.Result, ev.BuffDmg) ? "USED" : "CANCELLED")
+				? (CountsAsUsed(*revive, ev.Result, ev.BuffDmg, ev.Value, ev.IsActivation) ? "USED" : "CANCELLED")
 				: ArcDps::CastVerdict(ev.IsActivation);
 		}
 
@@ -371,8 +357,6 @@ namespace Capture
 				if (trackedBuff >= 0)
 				{
 					UpdateTrackedBuff(ev, srcAgent, dstAgent, trackedBuff);
-					// Chilled/slow/alacrity matter for revive casters' cast and recharge times; quickness only
-					// appears in the snapshot, it is applied too often to write every event.
 					AgentState* affected = sc == ArcDps::CBTS_BUFFAPPLY || sc == CBTS_BUFFINITIAL ? dstAgent : srcAgent;
 					writeTrackedBuff = trackedBuff != TB_QUICKNESS && affected && affected->IsReviveCaster;
 				}
@@ -489,7 +473,6 @@ namespace Capture
 		s_Recorder.Write(row);
 
 		std::scoped_lock lock(s_Mutex);
-		// Aliases may point at an entry that is being replaced or removed; rebuild them from new events.
 		s_IdAliases.clear();
 		if (aUpdate->Added)
 		{
@@ -584,7 +567,6 @@ namespace Capture
 			" subgroup=" + std::to_string(aMessage->Subgroup) +
 			" broadcast=" + std::to_string(aMessage->IsBroadcast & 1) +
 			" server_time=" + Str(aMessage->Timestamp);
-		// Only "!" commands are stored verbatim; normal chat is not written to disk.
 		row[COL_TEXT] = isCommand ? text : "<" + std::to_string(text.size()) + " chars not recorded>";
 		s_Recorder.Write(row);
 	}
@@ -594,12 +576,11 @@ namespace Capture
 		if (!LogKeys || aTextboxFocused) { return; }
 
 		bool isKey = aMsg == WM_KEYDOWN || aMsg == WM_SYSKEYDOWN;
-		if (isKey && (aLParam & (1 << 30))) { return; } // auto-repeat
+		if (isKey && (aLParam & (1 << 30))) { return; }
 
 		std::string name;
 		if (isKey)
 		{
-			// Key names are localized (e.g. German "Ö"); convert to UTF-8 so the CSV stays valid.
 			wchar_t wide[64] = {};
 			if (GetKeyNameTextW(static_cast<LONG>(aLParam), wide, static_cast<int>(std::size(wide))) > 0)
 			{
@@ -696,8 +677,6 @@ namespace Capture
 				{
 					if (wvw)
 					{
-						// How many squad-feed events each squad member produced in the last window; a drop to
-						// zero while they are fighting shows they left our visibility range.
 						CsvRow& row = rows.emplace_back();
 						row[COL_KIND] = "SEEN";
 						row[COL_ARRIVE_MS] = std::to_string(aTick.NowMs);
@@ -731,13 +710,12 @@ namespace Capture
 					if (stat.Count)
 					{
 						delays += " " + std::string(who[w]) + "_min=" + std::to_string(stat.Min) +
-							" " + who[w] + "_avg=" + std::to_string(stat.Sum / stat.Count) +
-							" " + who[w] + "_max=" + std::to_string(stat.Max);
+							" " + std::string(who[w]) + "_avg=" + std::to_string(stat.Sum / stat.Count) +
+							" " + std::string(who[w]) + "_max=" + std::to_string(stat.Max);
 					}
 					stat = DelayStat{};
 				}
 			}
-			// Wall clock next to timeGetTime lets two players' logs be lined up afterwards.
 			WriteInfoRow("CLOCK", "wall=" + WallClock() + " tgt=" + std::to_string(aTick.NowMs) +
 				" map_id=" + std::to_string(s_MapId.load()) + " wvw=" + std::to_string(wvw) +
 				" arc_events=" + std::to_string(s_ArcEvents.load()) + " ue_events=" + std::to_string(s_UeEvents.load()) +

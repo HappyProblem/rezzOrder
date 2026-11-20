@@ -18,7 +18,7 @@ bool CountsAsUsed(const ReviveSkill& aSkill, uint8_t aStopReason, int32_t aBaseM
 		return true;
 	}
 
-	// Hard interrupts / CC / going down or dying mid-cast: only count if the full base cast time already elapsed.
+	// Hard interrupts, CC, or going down/dead mid-cast: only count if the full unscaled cast time elapsed.
 	if (aStopReason == ArcDps::ANIMSTOP_INTERRUPT ||
 		aStopReason == 9 ||  // DEATH
 		aStopReason == 10 || // DOWNED
@@ -27,29 +27,27 @@ bool CountsAsUsed(const ReviveSkill& aSkill, uint8_t aStopReason, int32_t aBaseM
 		return aBaseMs >= aSkill.CastMs;
 	}
 
-	// ACTV_MINIMUM (3) means the cast passed the skill's trigger point and fired before the aftercast was cut short.
-	if (aActivation == ArcDps::ACTV_MINIMUM)
+	// Explicit manual cancel (6 = CANCEL, 17 = STOW): require full cast time (or full Quickness duration if unscaled is missing).
+	if (aStopReason == 6 || aStopReason == 17)
 	{
-		return true;
+		if (aBaseMs > 0) { return aBaseMs >= aSkill.CastMs; }
+		if (aScaledMs > 0) { return aScaledMs >= (static_cast<int32_t>(aSkill.CastMs) * 66) / 100; }
+		return false;
 	}
 
-	// If unscaled base duration (ev.BuffDmg) is reported, allow a 25% margin for cancelling the post-cast aftercast.
+	// Unscaled base duration (ev.BuffDmg) is already normalized for Quickness/Slow by ArcDPS.
+	// Allow a 10% margin (90% of CastMs) for cancelling post-trigger aftercast by moving or queueing the next skill.
 	if (aBaseMs > 0)
 	{
-		return aBaseMs >= (static_cast<int32_t>(aSkill.CastMs) * 75) / 100;
+		return aBaseMs >= (static_cast<int32_t>(aSkill.CastMs) * 90) / 100;
 	}
 
-	// When aBaseMs == 0 (ACTV_NODATA), only real-time duration (aScaledMs / ev.Value) is available.
-	// With Quickness in WvW (33.3% faster), a full cast takes 66.7% of CastMs (~833 ms for Illusion of Life),
-	// and cutting off the aftercast by moving or queueing the next skill happens around ~58-65% of CastMs.
+	// When aBaseMs == 0 (e.g. ACTV_NODATA), only real-time duration (aScaledMs / ev.Value) is available.
+	// With Quickness (+50% speed), a full cast takes 66.7% of CastMs (~833 ms for Illusion of Life).
+	// Allow a small aftercast-cancel margin down to 62% (~775 ms for IoL, ~930 ms for 1.5s, ~1240 ms for 2.0s).
 	if (aScaledMs > 0)
 	{
-		// Explicit manual cancel (6 = CANCEL, 17 = STOW) requires full Quickness duration.
-		if (aStopReason == 6 || aStopReason == 17)
-		{
-			return aScaledMs >= (static_cast<int32_t>(aSkill.CastMs) * 66) / 100;
-		}
-		return aScaledMs >= (static_cast<int32_t>(aSkill.CastMs) * 58) / 100;
+		return aScaledMs >= (static_cast<int32_t>(aSkill.CastMs) * 62) / 100;
 	}
 
 	return false;

@@ -158,8 +158,11 @@ namespace Rezz
 		void UpdateSelfAgent(const ArcDps::Agent* aAgent, uint16_t aInstId);
 		void RecordBackupSkillUse(uint64_t aTimeMs, const std::string& aAccount, ReviveGroup aGroup);
 		std::string ResolveAccount(uint64_t aId, uint16_t aInstanceId);
+		std::string ResolveAccountWithFallback(const ArcDps::Agent* aAgent, uint64_t aId, uint16_t aInstId, bool aAllowNameScan);
 		std::string AccountByInstance(uint16_t aInstanceId) const;
+		ReviveGroup CachedReviveGroupByName(uint32_t aSkillId, const char* aSkillName);
 		RosterMember& GetMember(const std::string& aAccount);
+		const RosterMember* FindMember(const std::string& aAccount) const;
 		bool InOrder(const std::string& aAccount) const;
 		void Notify(NoticeKind aKind, const std::string& aAccount, std::string aText);
 		std::string Named(const std::string& aAccount) const;
@@ -186,6 +189,7 @@ namespace Rezz
 		std::unordered_map<uint64_t, AgentRef>           m_Agents;
 		std::unordered_map<uint64_t, uint64_t>           m_Aliases;
 		std::unordered_map<uint64_t, MinionBoonState>    m_MinionBoons;
+		std::unordered_map<uint32_t, ReviveGroup>        m_SkillNameCache;
 		uint64_t                                         m_ClockOffsetMs = 0;
 		bool                                             m_HasClockOffset = false;
 		std::deque<PendingLeave>                         m_PendingLeaves;
